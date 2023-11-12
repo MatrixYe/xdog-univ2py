@@ -1,0 +1,23 @@
+title = "uniswap v2 sync&parse"
+network = "ethereum"
+factory = "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f"
+node_url = "https://aged-cosmological-snowflake.discover.quiknode.pro/edd8b6447abd44441d3112dc7cb3aa2b4540afb0/"
+start_block = 18554969
+sync_interval = 5
+sync_range = 400
+
+reparse = false
+parse_range = 500
+parse_interval = 3
+
+[mongo]
+host = "localhost"
+port = 5004
+username = "root"
+password = "password"
+
+[redis]
+host = "localhost"
+port = 5005
+password = "password"
+db = 0
