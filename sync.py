@@ -6,9 +6,11 @@
 # Description: 
 # -------------------------------------------------------------------------------
 import asyncio
+import json
 import logging
 from typing import Any
 
+import aioredis
 from pymongo import MongoClient
 from web3 import AsyncWeb3, AsyncHTTPProvider
 from web3.contract import AsyncContract
@@ -31,7 +33,8 @@ class Task:
         self._pair_abi = self._read_pair_abi()
         self._erc20_abi = self._read_erc20_abi()
 
-        self.db = self._fetch_database()
+        self.db = self._connect_mongo()
+        self.rs = self._connect_redis()
         self.w3 = self._load_eth_client()
         self.factory_instance = self._gen_factory_instance(self.conf.factory)
 
@@ -53,19 +56,22 @@ class Task:
 
         # todo  初始化其他集合，索引等操作
 
-    # 获取数据库，根据网络名称命名，如ethereum，这样可支持多链数据同步
-    def _fetch_database(self):
-        mg = self._load_mongo()
-        return mg[self.conf.network]
+    def _connect_redis(self):
+        host = self.conf.redis.host
+        port = self.conf.redis.port
+        password = self.conf.redis.password
+        db = self.conf.redis.db
+        redis_client = aioredis.StrictRedis(host=host, port=port, password=password, db=db, decode_responses=True)
+        return redis_client
 
-    # 加载mongo客户端
-    def _load_mongo(self):
+    # 获取数据库，根据网络名称命名，如ethereum，这样可支持多链数据同步
+    def _connect_mongo(self):
         host = self.conf.mongo.host
         port = self.conf.mongo.port
         username = self.conf.mongo.username
         password = self.conf.mongo.password
         client = MongoClient(host=host, port=port, username=username, password=password)
-        return client
+        return client[self.conf.network]
 
     # 加载以太坊客户端
     def _load_eth_client(self) -> AsyncWeb3:
@@ -118,8 +124,8 @@ class Task:
     async def run(self):
         self._initsysctrl()
         # 全量同步池子信息
-        await self._sync_all_pairs()
-        # await self._loop()
+        # await self._sync_all_pairs()
+        await self._loop()
 
     async def _loop(self):
         # print("this is loop")
@@ -141,6 +147,52 @@ class Task:
             if x == y:
                 print("local block = remote block")
                 await asyncio.sleep(self.conf.sync_interval)
+                continue
+            for i in range(x + 1, y + 1):
+                print(f"to scan block {i}")
+                await self._to_scan_block(i)
+                self._set_sync_block(i)
+                return
+
+    def _get_pair(self, addr: str):
+        self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
+
+    async def _fetch_tx(self, tx_hash) -> (str, str):
+        cache = await self.rs.get(tx_hash)
+        if cache:
+            print(f"cache is exist:{tx_hash}")
+            data = json.loads(cache)
+            return data['from'], data['to']
+        else:
+            print(f"cache is not exist:{tx_hash}")
+            tx = await self.w3.eth.get_transaction(tx_hash)
+            data = json.dumps({'from': tx['from'], 'to': tx['to']})
+            await self.rs.set(tx_hash, data, 60)
+            return tx['from'], tx['to']
+
+    async def _to_scan_block(self, i: int):
+        block = await self.w3.eth.get_block(i)
+        ts = block['timestamp']
+        logs = await self.w3.eth.get_logs(filter_params={
+            'fromBlock': i,
+            'toBlock': i,
+            # 'address': self.w3.to_checksum_address(self.config['tomo_address'])
+        })
+        for _, log in enumerate(logs):
+            # print(x, log.get('address'), type(log.get('address')))
+            # print(log)
+            tx_hash = log.get("transactionHash").hex()
+            # print(tx_hash)
+            contract_addr = log.get('address').lower()
+            if contract_addr == self.conf.factory.lower():
+                # 这是factory合约抛出来的event
+                (from_, to) = await self._fetch_tx(tx_hash)
+                print(f"这是factory合约抛出来的event,ts={ts} from={from_} to={to}")
+                continue
+            if self._get_pair(contract_addr):
+                # 这是pair合约抛出来的event
+                (from_, to) = await self._fetch_tx(tx_hash)
+                print(f"这是pair合约抛出来的event,ts={ts} from={from_} to={to}")
                 continue
 
     # 获取远程block高度
@@ -189,10 +241,9 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        pass
-        # self._initsysctrl()
-        # self._to_sync_signpair(280000)
-        # self._set_local_pair_index(280000)
+        # await self._to_scan_block(18554698)
+        tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
+        print(tx)
 
     async def _to_sync_signpair(self, i: int):
         lg.info(f"to sync pair index:{i}")
@@ -335,5 +386,8 @@ class Task:
 
 async def task():
     lg.info("start to sync ... ...")
-    # await Task().debug()
-    await Task().run()
+    await Task().debug()
+    # await Task().run()
+
+# 0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f
+# 0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f
