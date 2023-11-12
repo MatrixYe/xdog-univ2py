@@ -6,7 +6,7 @@ node_url = "https://indulgent-rough-feather.discover.quiknode.pro/30e19cc5162c0c
 full_pair = true
 
 start_block = 0
-sync_interval = 5
+sync_interval = 7
 sync_range = 400
 
 reparse = false
