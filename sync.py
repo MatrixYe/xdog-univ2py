@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 import aioredis
+from eth_abi import abi
 from pymongo import MongoClient
 from web3 import AsyncWeb3, AsyncHTTPProvider
 from web3.contract import AsyncContract
@@ -23,6 +24,7 @@ lg = logging.getLogger(__name__)
 BASE = "univ2_base"
 TOKENS = "tokens"
 UNIV2_PAIRS = "univ2_pairs"
+UNIV2_EVENT = "univ2_event"
 
 
 class Task:
@@ -162,12 +164,13 @@ class Task:
         if cache:
             print(f"cache is exist:{tx_hash}")
             data = json.loads(cache)
-            return data['from'], data['to']
+            return data['from'].lower(), data['to'].lower()
         else:
             print(f"cache is not exist:{tx_hash}")
             tx = await self.w3.eth.get_transaction(tx_hash)
-            data = json.dumps({'from': tx['from'], 'to': tx['to']})
-            await self.rs.set(tx_hash, data, 60)
+            data = json.dumps({'from': tx['from'].lower(), 'to': tx['to'].lower()})
+            print(data)
+            await self.rs.set(tx_hash, data, 120)
             return tx['from'], tx['to']
 
     async def _to_scan_block(self, i: int):
@@ -178,18 +181,20 @@ class Task:
             'toBlock': i,
             # 'address': self.w3.to_checksum_address(self.config['tomo_address'])
         })
-        for _, log in enumerate(logs):
+        for log in logs:
             tx_hash = log.get("transactionHash").hex()
             contract_addr = log.get('address').lower()
             if contract_addr == self.conf.factory.lower():
                 # 这是factory合约抛出来的event
                 (from_, to) = await self._fetch_tx(tx_hash)
                 print(f"这是factory合约抛出来的event,ts={ts} from={from_} to={to}")
+                self._handle_factory_event(ts, from_, to, log)
                 continue
             if self._get_pair(contract_addr):
                 # 这是pair合约抛出来的event
                 (from_, to) = await self._fetch_tx(tx_hash)
                 print(f"这是pair合约抛出来的event,ts={ts} from={from_} to={to}")
+                self._handle_pair_event(ts, from_, log)
                 continue
 
     # 获取远程block高度
@@ -238,9 +243,9 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        # await self._to_scan_block(18554698)
-        tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
-        print(tx)
+        await self._to_scan_block(18557877)
+        # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
+        # print(tx)
 
     async def _to_sync_signpair(self, i: int):
         lg.info(f"to sync pair index:{i}")
@@ -379,6 +384,72 @@ class Task:
     def _read_erc20_abi():
         with open('./source/abi/IERC20.abi', 'r') as f:
             return f.read()
+
+    @staticmethod
+    def _parse_com(log):
+        address = log.get('address')
+        # block_hash = log.get('blockHash')
+        block_number = log.get('blockNumber')
+        log_index = log.get('logIndex')
+        topics = log.get('topics')
+        tx_hash = log.get('transactionHash')
+        tx_index = log.get('transactionIndex')
+        return {
+            '_id': f"N{block_number}I{log_index}",
+            'address': address.lower(),
+            'block_number': block_number,
+            # 'block_hash': block_hash.hex().lower(),# 废弃字段
+            'log_index': log_index,
+            'tx_hash': tx_hash.hex().lower(),
+            'tx_index': tx_index,
+            'topic0': [a.hex() for a in topics]
+        }
+
+    # 处理factory的合约event
+    def _handle_factory_event(self, ts: int, from_: str, to: str, log):
+        topics = log.get('topics')
+        if not topics:
+            return
+        match topics[0].hex().lower():
+            case '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9':
+                event_name = "PairCreated"
+                lg.info(f"find event {event_name}")
+                self._handle_factory_event_paircreated(ts, from_, to, log, event_name)
+
+    def _handle_factory_event_paircreated(self, ts: int, from_: str, to: str, log, event_name):
+        print(log)
+        event = self._parse_com(log)
+        print(event)
+        arg_types = ['address', 'uint256']
+        data = log.get('data')
+        print(data)
+        topics = log.get("topics")
+        token0 = topics[1].hex().replace("000000000000000000000000", "")
+        token1 = topics[2].hex().replace("000000000000000000000000", "")
+        (pair, pindex) = abi.decode(arg_types, data)
+        entity = {
+            'token0': token0.lower(),
+            'token1': token1.lower(),
+            'pair': pair.lower(),
+            'pindex': pindex
+        }
+        event['from'] = from_
+        event['to'] = to
+        event['name'] = event_name
+        event['ts'] = ts
+        event['entity'] = entity
+        self._save_factory_paircreated(event)
+
+    def _save_factory_paircreated(self, event: dict):
+        try:
+            self.db[UNIV2_EVENT].insert_one(event)
+        except Exception as e:
+            lg.error(e)
+
+    # 处理pair合约的event
+    def _handle_pair_event(self, ts, from_, log):
+        # todo
+        pass
 
 
 async def task():
