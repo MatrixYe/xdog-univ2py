@@ -161,12 +161,12 @@ class Task:
     async def _fetch_from(self, tx_hash) -> str:
         cache = await self.rs.get(tx_hash)
         if cache:
-            print(f"cache is exist:{tx_hash}")
+            lg.info(f"cache is exist:{tx_hash}")
             return cache
         else:
-            print(f"cache is not exist:{tx_hash}")
+            # print(f"cache is not exist:{tx_hash}")
             tx = await self.w3.eth.get_transaction(tx_hash)
-            await self.rs.set(tx_hash, tx['from'].lower(), 120)
+            await self.rs.set(tx_hash, tx['from'].lower(), 300)
             return tx['from']
 
     async def _to_scan_block(self, i: int):
@@ -415,7 +415,7 @@ class Task:
         match topics[0].hex().lower():
             case '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9':
                 event_name = "PairCreated"
-                lg.info(f"find event {event_name}")
+                lg.info(f"find event Factoy:{event_name}")
                 self._handle_factory_event_paircreated(ts, from_, log, event_name)
 
     # 处理pair合约的event
@@ -426,11 +426,11 @@ class Task:
         match topics[0].hex().lower():
             case '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822':
                 event_name = "Swap"
-                lg.info(f"find pair event {event_name}")
+                lg.info(f"find event Pair:{event_name}")
                 self._handle_pair_event_swap(ts, from_, log, event_name)
             case '0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1':
                 event_name = "Sync"
-                lg.info(f"find pair event {event_name}")
+                lg.info(f"find event Pair:{event_name}")
                 self._handle_pair_event_sync(ts, from_, log, event_name)
                 pass
 
