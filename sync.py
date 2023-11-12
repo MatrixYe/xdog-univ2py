@@ -5,7 +5,9 @@
 # Date:         2021/10/22 2:44 下午
 # Description: 
 # -------------------------------------------------------------------------------
+import asyncio
 import logging
+from typing import Any
 
 from pymongo import MongoClient
 from web3 import Web3, HTTPProvider
@@ -35,7 +37,7 @@ class Task:
 
     # 初始化操作
     def _initsysctrl(self):
-        result = self.db[BASE].find_one({"_id": 1})
+        result = self._get_base()
         if not result:
             print("base is  not exist")
             data = {
@@ -71,13 +73,13 @@ class Task:
         return Web3(HTTPProvider(endpoint_uri=self.conf.node_url))
 
     # 获取本地同步最新的uniswap v2 pair index
-    def _get_local_pair_index(self):
-        result = self.db[BASE].find_one(filter={'_id': 1})
+    def _get_local_pair_index(self) -> int:
+        result = self._get_base()
         return result['pair_index']
 
     # 设置最新同步uniswap v2池子索引
     def _set_local_pair_index(self, index: int):
-        self.db[BASE].update_one(filter={'_id': 1}, update={'$set': {'pair_index': index}})
+        self._update_base("pair_index", index)
 
     def _fetch_logs(self, start_block, end_block):
         try:
@@ -106,22 +108,61 @@ class Task:
         return self.w3.eth.contract(address=contract_address, abi=self._erc20_abi)
 
     def _get_remote_pair_index(self) -> int:
-        func = getattr(self.factory_instance.functions, 'allPairsLength')()
-        result = func.call()
-        return result
+        try:
+            return getattr(self.factory_instance.functions, 'allPairsLength')().call()
+        except Exception as e:
+            lg.error(e)
+            return 0
 
     # 核心功能代码入口
     async def run(self):
         self._initsysctrl()
         # 全量同步池子信息
         self._sync_all_pairs()
+        await self._loop()
+
+    async def _loop(self):
+        # await asyncio.sleep(1)
+        while True:
+            x = self._get_sync_block()
+            y = self._get_remote_block_number()
+            lg.info(f"loop sync local block:{x} remote block:{y}")
+            if y == 0:
+                lg.error("failed to get remote block!")
+                await asyncio.sleep(10)
+                continue
+
+    # 获取远程block高度
+    def _get_remote_block_number(self) -> int:
+        try:
+            return self.w3.eth.block_number
+        except Exception as e:
+            lg.error(e)
+            return 0
+
+    # 获取本地同步sync高度
+    def _get_sync_block(self) -> int:
+        base = self._get_base()
+        return base.get('sync_block')
+
+    def _set_sync_block(self, height: int):
+        self._update_base('sync_block', height)
+
+    def _get_base(self):
+        return self.db[BASE].find_one({'_id': 1})
+
+    def _update_base(self, field: str, new_data: Any):
+        self.db[BASE].update_one({'_id': 1}, {'$set': {field: new_data}})
 
     def _sync_all_pairs(self):
         lg.info(f"sync_all_pairs:{self.conf.full_pair}")
         while self.conf.full_pair:
             x = self._get_local_pair_index()
-            y = self._get_remote_pair_index()  # 测试获取远程的pair 最新索引
+            y = self._get_remote_pair_index()  # 获取远程的pair 最新索引
             lg.info(f"get local pair index:{x},get remote pair index{y}")
+            if not y:
+                lg.warning("failed to get remote block!")
+                break
             if x > y:
                 lg.warning(f"local pair index:{x} > remote pair index!what happen")
                 break
@@ -136,22 +177,6 @@ class Task:
         # self._initsysctrl()
         self._to_sync_signpair(280000)
         self._set_local_pair_index(280000)
-        # while True:
-        #     x = self._get_local_pair_index()
-        #     y = self._get_remote_pair_index()  # 测试获取远程的pair 最新索引
-        #     x = -1
-        #     y = 15
-        #     print("x=", x)
-        #     print("y=", y)
-        #     break
-        # if x == y:
-        #     break
-        # for i in range(x + 1, y + 1):
-        #     print(f"to sync pair in {i}")
-        #     self._to_sync_signpair(i)
-        #     self._set_local_pair_index(i)
-
-        # print(x)
 
     def _to_sync_signpair(self, i):
         lg.info(f"to sync pair index:{i}")
@@ -218,7 +243,7 @@ class Task:
         except Exception as e:
             lg.error(e)
 
-    def _fetch_erc20(self, addr: str):
+    def _fetch_erc20(self, addr: str) -> dict | None:
         ltoken = self._get_local_erc20(addr)
         if ltoken:
             return ltoken
@@ -241,7 +266,7 @@ class Task:
         }
         self._insert_docm(TOKENS, data)
 
-    def _get_remote_erc20(self, addr: str):
+    def _get_remote_erc20(self, addr: str) -> dict | None:
         try:
             erc20_instance = self._gen_erc20_instance(addr)
             symbol = getattr(erc20_instance.functions, "symbol")().call()
@@ -255,7 +280,7 @@ class Task:
             lg.error(e)
             return None
 
-    def _get_local_erc20(self, addr: str) -> [dict, None]:
+    def _get_local_erc20(self, addr: str) -> dict | None:
         token = self.db[TOKENS].find_one(filter={'_id': addr.lower()})
         if not token:
             return None
@@ -288,6 +313,6 @@ class Task:
 
 
 async def task():
-    print("start to sync ... ...")
+    lg.info("start to sync ... ...")
     # await Task().debug()
     await Task().run()
