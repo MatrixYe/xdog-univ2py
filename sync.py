@@ -179,10 +179,7 @@ class Task:
             # 'address': self.w3.to_checksum_address(self.config['tomo_address'])
         })
         for _, log in enumerate(logs):
-            # print(x, log.get('address'), type(log.get('address')))
-            # print(log)
             tx_hash = log.get("transactionHash").hex()
-            # print(tx_hash)
             contract_addr = log.get('address').lower()
             if contract_addr == self.conf.factory.lower():
                 # 这是factory合约抛出来的event
