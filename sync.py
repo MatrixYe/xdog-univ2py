@@ -6,7 +6,6 @@
 # Description: 
 # -------------------------------------------------------------------------------
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -44,7 +43,7 @@ class Task:
     def _initsysctrl(self):
         result = self._get_base()
         if not result:
-            print("base is  not exist")
+            # print("base is  not exist")
             data = {
                 '_id': 1,
                 'pair_index': -1,  # 没有同步时，新开始的索引为0=-1 +1
@@ -157,21 +156,18 @@ class Task:
                 return
 
     def _get_pair(self, addr: str):
-        self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
+        return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
 
-    async def _fetch_tx(self, tx_hash) -> (str, str):
+    async def _fetch_from(self, tx_hash) -> str:
         cache = await self.rs.get(tx_hash)
         if cache:
             print(f"cache is exist:{tx_hash}")
-            data = json.loads(cache)
-            return data['from'].lower(), data['to'].lower()
+            return cache
         else:
             print(f"cache is not exist:{tx_hash}")
             tx = await self.w3.eth.get_transaction(tx_hash)
-            data = json.dumps({'from': tx['from'].lower(), 'to': tx['to'].lower()})
-            print(data)
-            await self.rs.set(tx_hash, data, 120)
-            return tx['from'], tx['to']
+            await self.rs.set(tx_hash, tx['from'].lower(), 120)
+            return tx['from']
 
     async def _to_scan_block(self, i: int):
         block = await self.w3.eth.get_block(i)
@@ -186,14 +182,14 @@ class Task:
             contract_addr = log.get('address').lower()
             if contract_addr == self.conf.factory.lower():
                 # 这是factory合约抛出来的event
-                (from_, to) = await self._fetch_tx(tx_hash)
-                print(f"这是factory合约抛出来的event,ts={ts} from={from_} to={to}")
-                self._handle_factory_event(ts, from_, to, log)
+                from_ = await self._fetch_from(tx_hash)
+                # print(f"这是factory合约抛出来的event,ts={ts} from={from_} to={to}")
+                self._handle_factory_event(ts, from_, log)
                 continue
             if self._get_pair(contract_addr):
                 # 这是pair合约抛出来的event
-                (from_, to) = await self._fetch_tx(tx_hash)
-                print(f"这是pair合约抛出来的event,ts={ts} from={from_} to={to}")
+                from_ = await self._fetch_from(tx_hash)
+                # print(f"这是pair合约抛出来的event,ts={ts} from={from_} to={to}")
                 self._handle_pair_event(ts, from_, log)
                 continue
 
@@ -243,8 +239,8 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        await self._to_scan_block(18557877)
-        # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
+        await self._to_scan_block(18534861)
+        # tx = await self._fetch_from("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
         # print(tx)
 
     async def _to_sync_signpair(self, i: int):
@@ -405,8 +401,14 @@ class Task:
             'topic0': [a.hex() for a in topics]
         }
 
+    def _save_event(self, event: dict):
+        try:
+            self.db[UNIV2_EVENT].insert_one(event)
+        except Exception as e:
+            lg.error(e)
+
     # 处理factory的合约event
-    def _handle_factory_event(self, ts: int, from_: str, to: str, log):
+    def _handle_factory_event(self, ts: int, from_: str, log):
         topics = log.get('topics')
         if not topics:
             return
@@ -414,18 +416,33 @@ class Task:
             case '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9':
                 event_name = "PairCreated"
                 lg.info(f"find event {event_name}")
-                self._handle_factory_event_paircreated(ts, from_, to, log, event_name)
+                self._handle_factory_event_paircreated(ts, from_, log, event_name)
 
-    def _handle_factory_event_paircreated(self, ts: int, from_: str, to: str, log, event_name):
-        print(log)
+    # 处理pair合约的event
+    def _handle_pair_event(self, ts: int, from_: str, log):
+        topics = log.get('topics')
+        if not topics:
+            return
+        match topics[0].hex().lower():
+            case '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822':
+                event_name = "Swap"
+                lg.info(f"find pair event {event_name}")
+                self._handle_pair_event_swap(ts, from_, log, event_name)
+            case '0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1':
+                event_name = "Sync"
+                lg.info(f"find pair event {event_name}")
+                self._handle_pair_event_sync(ts, from_, log, event_name)
+                pass
+
+    def _handle_factory_event_paircreated(self, ts: int, from_: str, log, event_name):
+
         event = self._parse_com(log)
-        print(event)
         arg_types = ['address', 'uint256']
         data = log.get('data')
-        print(data)
         topics = log.get("topics")
-        token0 = topics[1].hex().replace("000000000000000000000000", "")
-        token1 = topics[2].hex().replace("000000000000000000000000", "")
+        # abi.decode(['address'], topics[1])[0]
+        token0 = abi.decode(['address'], topics[1])[0]
+        token1 = abi.decode(['address'], topics[2])[0]
         (pair, pindex) = abi.decode(arg_types, data)
         entity = {
             'token0': token0.lower(),
@@ -434,28 +451,53 @@ class Task:
             'pindex': pindex
         }
         event['from'] = from_
-        event['to'] = to
         event['name'] = event_name
         event['ts'] = ts
         event['entity'] = entity
-        self._save_factory_paircreated(event)
+        self._save_event(event)
 
-    def _save_factory_paircreated(self, event: dict):
-        try:
-            self.db[UNIV2_EVENT].insert_one(event)
-        except Exception as e:
-            lg.error(e)
+    def _handle_pair_event_swap(self, ts, from_, log, event_name):
+        # ndex_topic_1 address sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, index_topic_2 address to
+        event = self._parse_com(log)
 
-    # 处理pair合约的event
-    def _handle_pair_event(self, ts, from_, log):
-        # todo
-        pass
+        topics = log.get("topics")
+        sender = abi.decode(['address'], topics[1])[0]
+        s_to = abi.decode(['address'], topics[2])[0]
+        # s_to = topics[2].hex().replace("000000000000000000000000", "")
+        arg_types = ['uint256', 'uint256', 'uint256', 'uint256']
+        data = log.get('data')
+        (amount0in, amount1in, amount0out, amount1out) = abi.decode(arg_types, data)
+        event['from'] = from_
+        event['name'] = event_name
+        event['ts'] = ts
+        entity = {
+            'sender': sender,
+            'amount0in': str(amount0in),
+            'amount1in': str(amount1in),
+            'amount0out': str(amount0out),
+            'amount1out': str(amount1out),
+            'to': s_to
+        }
+        event['entity'] = entity
+        self._save_event(event)
+
+    def _handle_pair_event_sync(self, ts, from_, log, event_name):
+        event = self._parse_com(log)
+        event['from'] = from_
+        event['name'] = event_name
+        event['ts'] = ts
+        arg_types = ['uint112', 'uint112']
+        data = log.get('data')
+        (reserve0, reserve1) = abi.decode(arg_types, data)
+        entity = {
+            'reserve0': str(reserve0),
+            'reserve1': str(reserve1),
+        }
+        event['entity'] = entity
+        self._save_event(event)
 
 
 async def task():
     lg.info("start to sync ... ...")
     await Task().debug()
     # await Task().run()
-
-# 0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f
-# 0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f
