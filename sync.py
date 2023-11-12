@@ -5,7 +5,6 @@
 # Date:         2021/10/22 2:44 下午
 # Description: 
 # -------------------------------------------------------------------------------
-import asyncio
 import logging
 
 from pymongo import MongoClient
@@ -18,6 +17,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 lg = logging.getLogger(__name__)
 
 BASE = "univ2_base"
+TOKENS = "tokens"
+UNIV2_PAIRS = "univ2_pairs"
 
 
 class Task:
@@ -32,14 +33,29 @@ class Task:
         self.w3 = self._load_eth_client()
         self.factory_instance = self._gen_factory_instance(self.conf.factory)
 
+    # 初始化操作
+    def _initsysctrl(self):
+        result = self.db[BASE].find_one({"_id": 1})
+        if not result:
+            print("base is  not exist")
+            data = {
+                '_id': 1,
+                'pair_index': -1,  # 没有同步时，新开始的索引为0=-1 +1
+                'start_block': self.conf.start_block,
+                'sync_block': self.conf.start_block,
+                'parse_block': self.conf.start_block
+            }
+            self.db[BASE].insert_one(data)
+        else:
+            print("base is exist")
+            print(result)
+
+        # todo  初始化其他集合，索引等操作
+
     # 获取数据库，根据网络名称命名，如ethereum，这样可支持多链数据同步
     def _fetch_database(self):
         mg = self._load_mongo()
         return mg[self.conf.network]
-
-    @staticmethod
-    def _load_config() -> Config:
-        return load_config("./config.toml")
 
     # 加载mongo客户端
     def _load_mongo(self):
@@ -62,25 +78,6 @@ class Task:
     # 设置最新同步uniswap v2池子索引
     def _set_local_pair_index(self, index: int):
         self.db[BASE].update_one(filter={'_id': 1}, update={'$set': {'pair_index': index}})
-
-    # 初始化操作
-    def _initsysctrl(self):
-        result = self.db[BASE].find_one({"_id": 1})
-        if not result:
-            print("base is  not exist")
-            data = {
-                '_id': 1,
-                'pair_index': -1,  # 没有同步时，新开始的索引为0=-1 +1
-                'start_block': self.conf.start_block,
-                'sync_block': self.conf.start_block,
-                'parse_block': self.conf.start_block
-            }
-            self.db[BASE].insert_one(data)
-        else:
-            print("base is exist")
-            print(result)
-
-        # todo  初始化其他集合，索引等操作
 
     def _fetch_logs(self, start_block, end_block):
         try:
@@ -111,20 +108,34 @@ class Task:
     def _get_remote_pair_index(self) -> int:
         func = getattr(self.factory_instance.functions, 'allPairsLength')()
         result = func.call()
-        lg.info(f"get remote pair index is {result}")
         return result
 
     # 核心功能代码入口
     async def run(self):
         self._initsysctrl()
-        while True:
-            num = self.w3.eth.block_number
-            print(f"block number  is {num}")
-            await asyncio.sleep(5)
+        # 全量同步池子信息
+        self._sync_all_pairs()
+
+    def _sync_all_pairs(self):
+        lg.info(f"sync_all_pairs:{self.conf.full_pair}")
+        while self.conf.full_pair:
+            x = self._get_local_pair_index()
+            y = self._get_remote_pair_index()  # 测试获取远程的pair 最新索引
+            lg.info(f"get local pair index:{x},get remote pair index{y}")
+            if x > y:
+                lg.warning(f"local pair index:{x} > remote pair index!what happen")
+                break
+            if x == y:
+                break
+            for i in range(x + 1, y + 1):
+                self._to_sync_signpair(i)
+                self._set_local_pair_index(i)
+        lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
         # self._initsysctrl()
         self._to_sync_signpair(280000)
+        self._set_local_pair_index(280000)
         # while True:
         #     x = self._get_local_pair_index()
         #     y = self._get_remote_pair_index()  # 测试获取远程的pair 最新索引
@@ -144,24 +155,121 @@ class Task:
 
     def _to_sync_signpair(self, i):
         lg.info(f"to sync pair index:{i}")
-        result = getattr(self.factory_instance.functions, 'allPairs')(i).call()
-        lg.info(f"pair address is : {result}")
-        pair_instance = self._gen_pair_instance(result)
+        pair_addr: str = getattr(self.factory_instance.functions, 'allPairs')(i).call()
+        lg.info(f"pair address is : {pair_addr}")
+        pair_instance = self._gen_pair_instance(pair_addr)
         token0 = getattr(pair_instance.functions, "token0")().call()
         token1 = getattr(pair_instance.functions, "token1")().call()
-        print(f"token0={token0} token1={token1}")
-        # self._gen_erc20_instance()
-        self._fetch_erc20(addr=token0)
+        lg.info(f"token0={token0} token1={token1}")
+        t0_info = self._fetch_erc20(addr=token0)
+        t1_info = self._fetch_erc20(addr=token1)
+        if not t0_info or not t1_info:
+            lg.warning(f"token0:{token0} or token1{token1} is not a norm erc20 token --> pass")
+            return
+        t0_addr = t0_info['address']
+        t0_symbol = t0_info['symbol']
+        t0_decimal = t0_info['decimal']
+        t1_addr = t1_info['address']
+        t1_symbol = t1_info['symbol']
+        t1_decimal = t1_info['decimal']
+        self._to_save_pair(pair_addr, t0_addr, t0_symbol, t0_decimal, t1_addr, t1_symbol, t1_decimal)
 
-        pass
+    def _to_save_pair(self,
+                      pair_addr: str,
+                      t0_addr: str,
+                      t0_symbol: str,
+                      t0_decimal: int,
+                      t1_addr: str,
+                      t1_symbol: str,
+                      t1_decimal: int):
+        lg.info(f"to save pair:{pair_addr.lower()}")
+        if t1_symbol in ["WETH", "USDC", "USCT", "DAI"]:
+            # coin is t0
+            data = {
+                '_id': pair_addr.lower(),
+                'pair': pair_addr.lower(),
+                'name': f"{t0_symbol}{t1_symbol}",
+                'coin_addr': t0_addr.lower(),
+                'coin_symbol': t0_symbol,
+                'coin_decimal': t0_decimal,
+                'stable_addr': t1_addr.lower(),
+                'stable_symbol': t1_symbol,
+                'stable_decimal': t1_decimal
+            }
+            self._insert_docm(UNIV2_PAIRS, data)
+        else:
+            # coin is t1
+            data = {
+                '_id': pair_addr.lower(),
+                'pair': pair_addr.lower(),
+                'name': f"{t1_symbol}{t0_symbol}",
+                'coin_addr': t1_addr.lower(),
+                'coin_symbol': t1_symbol,
+                'coin_decimal': t1_decimal,
+                'stable_addr': t0_addr.lower(),
+                'stable_symbol': t0_symbol,
+                'stable_decimal': t0_decimal
+            }
+            self._insert_docm(UNIV2_PAIRS, data)
+
+    def _insert_docm(self, coll: str, data):
+        try:
+            self.db[coll].insert_one(data)
+        except Exception as e:
+            lg.error(e)
 
     def _fetch_erc20(self, addr: str):
-        # todo 优先从本地
+        ltoken = self._get_local_erc20(addr)
+        if ltoken:
+            return ltoken
+        else:
+            lg.info(f"token is not in local:{addr} -> fetch by remote")
+            rtoken = self._get_remote_erc20(addr)
+            self._to_save_erc20(rtoken)
+            return rtoken
 
+    def _to_save_erc20(self, rtoken: dict):
+        if not rtoken:
+            return
+        lg.info(f'to save erc20 token:{rtoken["symbol"]}')
+        data = {
+            '_id': rtoken['address'].lower(),
+            'type': 'erc20',
+            'address': rtoken['address'].lower(),
+            'symbol': rtoken['symbol'],
+            'decimal': rtoken['decimal']
+        }
+        self._insert_docm(TOKENS, data)
+
+    def _get_remote_erc20(self, addr: str):
+        try:
+            erc20_instance = self._gen_erc20_instance(addr)
+            symbol = getattr(erc20_instance.functions, "symbol")().call()
+            decimal = getattr(erc20_instance.functions, "decimals")().call()
+            return {
+                'address': addr,
+                'symbol': symbol,
+                'decimal': decimal
+            }
+        except Exception as e:
+            lg.error(e)
+            return None
+
+    def _get_local_erc20(self, addr: str) -> [dict, None]:
+        token = self.db[TOKENS].find_one(filter={'_id': addr.lower()})
+        if not token:
+            return None
+        else:
+            return {
+                'address': token.get('address'),
+                'symbol': token.get('symbol'),
+                'decimal': token.get('decimal')
+            }
         pass
 
-    def _get_local_erc20(self):
-        pass
+    @staticmethod
+    def _load_config() -> Config:
+        return load_config("./config.toml")
 
     @staticmethod
     def _read_factory_abi():
@@ -181,4 +289,5 @@ class Task:
 
 async def task():
     print("start to sync ... ...")
-    await Task().debug()
+    # await Task().debug()
+    await Task().run()
