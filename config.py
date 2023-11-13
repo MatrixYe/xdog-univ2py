@@ -27,6 +27,7 @@ class Config(BaseModel):
     title: str
     network: str
     factory: str
+    weth: str
     full_pair: bool
 
     node_url: HttpUrl

@@ -44,7 +44,6 @@ class Task:
     def _initsysctrl(self):
         result = self._get_base()
         if not result:
-            # print("base is  not exist")
             data = {
                 '_id': 1,
                 'pair_index': -1,  # 没有同步时，新开始的索引为0=-1 +1
@@ -163,13 +162,13 @@ class Task:
     async def _fetch_tx(self, tx_hash) -> dict | None:
         tx_cache = await self.rs.get(tx_hash)
         if tx_cache:
-            lg.info(f"cache is exist:{tx_hash}")
+            # lg.info(f"cache is exist:{tx_hash}")
             return json.loads(tx_cache)
         else:
             tx = await self._get_remote_tx(tx_hash)
             if not tx:
                 return None
-            data = {'from': tx['from'].lower(), 'nonce': tx['nonce']}
+            data = {'tx_hash': tx_hash.lower(), 'from': tx['from'].lower(), 'nonce': tx['nonce']}
             await self.rs.set(tx_hash, json.dumps(data), 600)
             return data
 
@@ -183,6 +182,7 @@ class Task:
         pass
 
     async def _to_scan_block(self, i: int):
+        lg.info(f'to scna block:{i}')
         block = await self.w3.eth.get_block(i)
         ts = block['timestamp']
         logs = await self.w3.eth.get_logs(filter_params={
@@ -193,14 +193,12 @@ class Task:
             tx_hash = log.get("transactionHash").hex()
             contract_addr = log.get('address').lower()
             if contract_addr == self.conf.factory.lower():
-                # 这是factory合约抛出来的event
                 tx = await self._fetch_tx(tx_hash)
                 if not tx:
                     continue
-                self._handle_factory_event(ts, tx, log)
+                await self._handle_factory_event(ts, tx, log)
                 continue
             if self._get_pair(contract_addr):
-                # 这是pair合约抛出来的event
                 tx = await self._fetch_tx(tx_hash)
                 if not tx:
                     continue
@@ -253,7 +251,7 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        await self._to_scan_block(18558582)
+        await self._to_scan_block(18561172)
         # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
         # print(tx)
 
@@ -422,7 +420,7 @@ class Task:
             lg.error(e)
 
     # 处理factory的合约event
-    def _handle_factory_event(self, ts: int, tx: dict, log):
+    async def _handle_factory_event(self, ts: int, tx: dict, log):
         topics = log.get('topics')
         if not topics:
             return
@@ -430,7 +428,7 @@ class Task:
             case '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9':
                 event_name = "PairCreated"
                 lg.info(f"find event Factoy:{event_name}")
-                self._handle_factory_event_paircreated(ts, tx, log, event_name)
+                await self._handle_factory_event_paircreated(ts, tx, log, event_name)
 
     # 处理pair合约的event
     def _handle_pair_event(self, ts: int, tx: dict, log):
@@ -447,7 +445,7 @@ class Task:
                 lg.info(f"find event Pair:{event_name}")
                 self._handle_pair_event_sync(ts, tx, log, event_name)
 
-    def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name):
+    async def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name):
 
         event = self._parse_com(log)
         arg_types = ['address', 'uint256']
@@ -469,6 +467,47 @@ class Task:
         event['ts'] = ts
         event['entity'] = entity
         self._save_event(event)
+        # 同步更新pair信息
+        # 忽略锚定币非weth的交易池
+        if self.conf.weth not in [token0.lower(), token1.lower()]:
+            lg.warning(f"not a Standard Pair:{pair} {token0} {token1}")
+            return
+        t0_info = await self._fetch_erc20(token0)
+        if not t0_info:
+            lg.warning(f"can not up new pair,token0 not erc20:{token0}")
+            return
+        t1_info = await self._fetch_erc20(token1)
+        # 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 WETH
+        if not t1_info:
+            lg.warning(f"can not up new pair,token1 not erc20:{token1}")
+            return
+        stab_index = 0 if self.conf.weth.lower() == t0_info['address'] else 1
+        new_pair_data = {
+            '_id': pair.lower(),
+            'eid': event.get('_id'),
+            'pair': pair.lower(),
+            'name': f"{t0_info['symbol']}/{t1_info['symbol']}" if stab_index == 1 else f"{t1_info['symbol']}/{t0_info['symbol']}",
+            'coin_addr': t0_info['address'] if stab_index == 1 else t1_info['address'],
+            'coin_symbol': t0_info['symbol'] if stab_index == 1 else t1_info['symbol'],
+            'coin_decimal': t0_info['decimal'] if stab_index == 1 else t1_info['decimal'],
+            'stable_addr': t0_info['address'] if stab_index == 0 else t1_info['address'],
+            'stable_symbol': t0_info['symbol'] if stab_index == 0 else t1_info['symbol'],
+            'stable_decimal': t0_info['decimal'] if stab_index == 0 else t1_info['decimal'],
+            'create_time': ts,
+            'create_tx': tx['tx_hash'],
+            'creator': tx['from']
+        }
+        self._find_and_set(UNIV2_PAIRS, {'_id': pair.lower()}, new_pair_data, upsert=True)
+
+    def _find_and_set(self, coll: str, query: dict, new_data: dict, upsert: bool):
+        try:
+            self.db[coll].find_one_and_update(filter=query, update={'$set': new_data}, upsert=upsert)
+        except Exception as e:
+            lg.error(f"_find_and_set:{new_data} {e}")
+
+    @staticmethod
+    def _equal(s1: str, s2: str) -> bool:
+        return s1.lower() == s2.lower()
 
     def _handle_pair_event_swap(self, ts, tx, log, event_name):
         # ndex_topic_1 address sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, index_topic_2 address to
@@ -519,3 +558,5 @@ async def task():
 
 # 测试sync 和swap 18534861
 # 结果地址 https://cn.etherscan.com/address/0xdc42550753f9ec121b416aca8a09e0820fa8df2f#events
+# 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+# 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
