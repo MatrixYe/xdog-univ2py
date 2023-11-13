@@ -6,6 +6,7 @@
 # Description: 
 # -------------------------------------------------------------------------------
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -54,7 +55,8 @@ class Task:
             self.db[BASE].insert_one(data)
         else:
             lg.info(f"base:{result}")
-
+        self.db[UNIV2_EVENT].create_index([('ts', -1)])
+        self.db[UNIV2_EVENT].create_index([('name', -1)])
         # todo  初始化其他集合，索引等操作
 
     def _connect_redis(self):
@@ -158,16 +160,27 @@ class Task:
     def _get_pair(self, addr: str):
         return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
 
-    async def _fetch_from(self, tx_hash) -> str:
-        cache = await self.rs.get(tx_hash)
-        if cache:
+    async def _fetch_tx(self, tx_hash) -> dict | None:
+        tx_cache = await self.rs.get(tx_hash)
+        if tx_cache:
             lg.info(f"cache is exist:{tx_hash}")
-            return cache
+            return json.loads(tx_cache)
         else:
-            # print(f"cache is not exist:{tx_hash}")
+            tx = await self._get_remote_tx(tx_hash)
+            if not tx:
+                return None
+            data = {'from': tx['from'].lower(), 'nonce': tx['nonce']}
+            await self.rs.set(tx_hash, json.dumps(data), 600)
+            return data
+
+    async def _get_remote_tx(self, tx_hash):
+        try:
             tx = await self.w3.eth.get_transaction(tx_hash)
-            await self.rs.set(tx_hash, tx['from'].lower(), 300)
-            return tx['from']
+            return tx
+        except Exception as e:
+            lg.error(f"_get_remote_tx:{e}")
+            return None
+        pass
 
     async def _to_scan_block(self, i: int):
         block = await self.w3.eth.get_block(i)
@@ -175,22 +188,23 @@ class Task:
         logs = await self.w3.eth.get_logs(filter_params={
             'fromBlock': i,
             'toBlock': i,
-            # 'address': self.w3.to_checksum_address(self.config['tomo_address'])
         })
         for log in logs:
             tx_hash = log.get("transactionHash").hex()
             contract_addr = log.get('address').lower()
             if contract_addr == self.conf.factory.lower():
                 # 这是factory合约抛出来的event
-                from_ = await self._fetch_from(tx_hash)
-                # print(f"这是factory合约抛出来的event,ts={ts} from={from_} to={to}")
-                self._handle_factory_event(ts, from_, log)
+                tx = await self._fetch_tx(tx_hash)
+                if not tx:
+                    continue
+                self._handle_factory_event(ts, tx, log)
                 continue
             if self._get_pair(contract_addr):
                 # 这是pair合约抛出来的event
-                from_ = await self._fetch_from(tx_hash)
-                # print(f"这是pair合约抛出来的event,ts={ts} from={from_} to={to}")
-                self._handle_pair_event(ts, from_, log)
+                tx = await self._fetch_tx(tx_hash)
+                if not tx:
+                    continue
+                self._handle_pair_event(ts, tx, log)
                 continue
 
     # 获取远程block高度
@@ -239,8 +253,8 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        await self._to_scan_block(18534861)
-        # tx = await self._fetch_from("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
+        await self._to_scan_block(18558582)
+        # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
         # print(tx)
 
     async def _to_sync_signpair(self, i: int):
@@ -408,7 +422,7 @@ class Task:
             lg.error(e)
 
     # 处理factory的合约event
-    def _handle_factory_event(self, ts: int, from_: str, log):
+    def _handle_factory_event(self, ts: int, tx: dict, log):
         topics = log.get('topics')
         if not topics:
             return
@@ -416,10 +430,10 @@ class Task:
             case '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9':
                 event_name = "PairCreated"
                 lg.info(f"find event Factoy:{event_name}")
-                self._handle_factory_event_paircreated(ts, from_, log, event_name)
+                self._handle_factory_event_paircreated(ts, tx, log, event_name)
 
     # 处理pair合约的event
-    def _handle_pair_event(self, ts: int, from_: str, log):
+    def _handle_pair_event(self, ts: int, tx: dict, log):
         topics = log.get('topics')
         if not topics:
             return
@@ -427,14 +441,13 @@ class Task:
             case '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822':
                 event_name = "Swap"
                 lg.info(f"find event Pair:{event_name}")
-                self._handle_pair_event_swap(ts, from_, log, event_name)
+                self._handle_pair_event_swap(ts, tx, log, event_name)
             case '0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1':
                 event_name = "Sync"
                 lg.info(f"find event Pair:{event_name}")
-                self._handle_pair_event_sync(ts, from_, log, event_name)
-                pass
+                self._handle_pair_event_sync(ts, tx, log, event_name)
 
-    def _handle_factory_event_paircreated(self, ts: int, from_: str, log, event_name):
+    def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name):
 
         event = self._parse_com(log)
         arg_types = ['address', 'uint256']
@@ -450,16 +463,16 @@ class Task:
             'pair': pair.lower(),
             'pindex': pindex
         }
-        event['from'] = from_
+        event['from'] = tx['from']
+        event['nonce'] = tx['nonce']
         event['name'] = event_name
         event['ts'] = ts
         event['entity'] = entity
         self._save_event(event)
 
-    def _handle_pair_event_swap(self, ts, from_, log, event_name):
+    def _handle_pair_event_swap(self, ts, tx, log, event_name):
         # ndex_topic_1 address sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, index_topic_2 address to
         event = self._parse_com(log)
-
         topics = log.get("topics")
         sender = abi.decode(['address'], topics[1])[0]
         s_to = abi.decode(['address'], topics[2])[0]
@@ -467,7 +480,8 @@ class Task:
         arg_types = ['uint256', 'uint256', 'uint256', 'uint256']
         data = log.get('data')
         (amount0in, amount1in, amount0out, amount1out) = abi.decode(arg_types, data)
-        event['from'] = from_
+        event['from'] = tx['from']
+        event['nonce'] = tx['nonce']
         event['name'] = event_name
         event['ts'] = ts
         entity = {
@@ -481,10 +495,11 @@ class Task:
         event['entity'] = entity
         self._save_event(event)
 
-    def _handle_pair_event_sync(self, ts, from_, log, event_name):
+    def _handle_pair_event_sync(self, ts, tx, log, event_name):
         event = self._parse_com(log)
-        event['from'] = from_
+        event['from'] = tx['from']
         event['name'] = event_name
+        event['nonce'] = tx['nonce']
         event['ts'] = ts
         arg_types = ['uint112', 'uint112']
         data = log.get('data')
@@ -501,3 +516,6 @@ async def task():
     lg.info("start to sync ... ...")
     await Task().debug()
     # await Task().run()
+
+# 测试sync 和swap 18534861
+# 结果地址 https://cn.etherscan.com/address/0xdc42550753f9ec121b416aca8a09e0820fa8df2f#events
