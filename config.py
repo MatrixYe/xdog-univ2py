@@ -45,5 +45,4 @@ class Config(BaseModel):
 
 def load_config(file_path: str) -> Config:
     c = Config.parse_obj(toml.load(file_path))
-    print(c)
     return c

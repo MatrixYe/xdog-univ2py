@@ -56,11 +56,20 @@ class Task:
             self.db[BASE].insert_one(data)
         else:
             lg.info(f"base:{result}")
-        self.db[UNIV2_EVENT].create_index([('ts', -1)])
-        self.db[UNIV2_EVENT].create_index([('name', -1)])
+        # event 索引
+        self.db[UNIV2_EVENT].create_index([('ts', 1)])
+        self.db[UNIV2_EVENT].create_index([('name', 1)])
+        # swap 集合索引
+        self.db[UNIV2_SWAP].create_index([("ts", 1)])
+        self.db[UNIV2_SWAP].create_index([("pair", 1), ("ts", 1)])
+        self.db[UNIV2_SWAP].create_index([("trader", 1), ("ts", 1)])
+        # 老鼠仓 索引
+        self.db[UNIV2_RAT].create_index([("pair", 1)])
+        self.db[UNIV2_RAT].create_index([("ts", 1)])
         # todo  初始化其他集合，索引等操作
 
     def _connect_redis(self):
+        lg.info("_connect_eth_client... ...")
         host = self.conf.redis.host
         port = self.conf.redis.port
         password = self.conf.redis.password
@@ -70,6 +79,7 @@ class Task:
 
     # 获取数据库，根据网络名称命名，如ethereum，这样可支持多链数据同步
     def _connect_mongo(self):
+        lg.info(f"_connect_mongo ... ...")
         host = self.conf.mongo.host
         port = self.conf.mongo.port
         username = self.conf.mongo.username
@@ -79,6 +89,7 @@ class Task:
 
     # 加载以太坊客户端
     def _connect_eth_client(self) -> AsyncWeb3:
+        lg.info(f"_connect_eth_client ... ...")
         return AsyncWeb3(AsyncHTTPProvider(endpoint_uri=self.conf.node_url))
 
     # 获取本地同步最新的uniswap v2 pair index
@@ -111,7 +122,7 @@ class Task:
             index = await getattr(self.factory_instance.functions, 'allPairsLength')().call()
             return index
         except Exception as e:
-            lg.error(e)
+            lg.error(f"_get_remote_pair_index:{e}")
             return 0
 
     # 核心功能代码入口
@@ -122,8 +133,6 @@ class Task:
         await self._loop()
 
     async def _loop(self):
-        # print("this is loop")
-        # await asyncio.sleep(3)
 
         while True:
             await asyncio.sleep(self.conf.sync_interval)
@@ -131,18 +140,23 @@ class Task:
             y = await self._get_remote_block_number()
             lg.info(f"loop sync local block:{x} remote block:{y}")
             if y == 0:
-                lg.error("failed to get remote block!")
+                lg.error("_loop:failed to get remote block!")
                 continue
             if x > y:
-                lg.warning("local block > remote block")
+                lg.warning("_loop:local block > remote block")
                 continue
             if x == y:
-                print("local block = remote block")
                 continue
+            if x == 0:
+                x = y - 1
+                lg.info(f"_loop:x=0,transf to x=y-1={x},scan by current block")
+                self._set_start_block(x)
+
             for i in range(x + 1, y + 1):
-                print(f"to scan block {i}")
+                lg.debug(f"_loop:to scan block {i}")
                 await self._to_scan_block(i)
                 self._set_sync_block(i)
+                await asyncio.sleep(0.2)
 
     def _get_pair(self, addr: str):
         return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
@@ -170,7 +184,7 @@ class Task:
         pass
 
     async def _to_scan_block(self, i: int):
-        lg.info(f'to scna block:{i}')
+        lg.info(f'to scan block:{i}')
         block = await self.w3.eth.get_block(i)
         ts = block['timestamp']
         logs = await self.w3.eth.get_logs(filter_params={
@@ -202,7 +216,7 @@ class Task:
             num = await self.w3.eth.block_number
             return num
         except Exception as e:
-            lg.error(e)
+            lg.error(f"_get_remote_block_number:{e}")
             return 0
 
     # 获取本地同步sync高度
@@ -210,8 +224,13 @@ class Task:
         base = self._get_base()
         return base.get('sync_block')
 
+    def _set_start_block(self, height: int):
+        self._update_base('sync_block', height)
+        lg.info(f"_set_start_block:{height}")
+
     def _set_sync_block(self, height: int):
         self._update_base('sync_block', height)
+        lg.info(f"_set_sync_block:{height}")
 
     def _get_base(self):
         return self.db[BASE].find_one({'_id': 1})
@@ -224,16 +243,16 @@ class Task:
         while self.conf.full_pair:
             x = self._get_local_pair_index()
             y = await self._get_remote_pair_index()  # 获取远程的pair 最新索引
-            lg.info(f"get local pair index:{x},get remote pair index{y}")
+            lg.info(f"get local pair index:{x},get remote pair length:{y}")
             if not y:
                 lg.warning("failed to get remote block!")
                 break
-            if x > y:
+            if x > y - 1:
                 lg.warning(f"local pair index:{x} > remote pair index!what happen")
                 break
-            if x == y:
+            if x == y - 1:
                 break
-            for i in range(x + 1, y + 1):
+            for i in range(x + 1, y):
                 await self._to_sync_signpair(i)
                 self._set_local_pair_index(i)
                 if debug:
@@ -242,32 +261,32 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        # await self._sync_all_pairs(debug=True)
-        await self._to_scan_block(18568477)
+        await self._sync_all_pairs(debug=True)
+        # await self._to_scan_block(18568477)
         # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
-        # print(tx)
 
     async def _to_sync_signpair(self, i: int):
-        lg.info(f"to sync pair index:{i}")
-        pair_addr: str = await getattr(self.factory_instance.functions, 'allPairs')(i).call()
-
-        lg.info(f"pair address is : {pair_addr}")
-        pair_instance = self._gen_pair_instance(pair_addr)
-        token0 = await getattr(pair_instance.functions, "token0")().call()
-        token1 = await getattr(pair_instance.functions, "token1")().call()
-        lg.info(f"token0={token0} token1={token1}")
-        t0_info = await self._fetch_erc20(addr=token0)
-        t1_info = await self._fetch_erc20(addr=token1)
-        if not t0_info or not t1_info:
-            lg.warning(f"token0:{token0} or token1{token1} is not a norm erc20 token --> pass")
-            return
-        t0_addr = t0_info['address']
-        t0_symbol = t0_info['symbol']
-        t0_decimal = t0_info['decimal']
-        t1_addr = t1_info['address']
-        t1_symbol = t1_info['symbol']
-        t1_decimal = t1_info['decimal']
-        self._to_save_pair(i, pair_addr, t0_addr, t0_symbol, t0_decimal, t1_addr, t1_symbol, t1_decimal)
+        lg.info(f"to sync sign pair index:{i}")
+        try:
+            pair_addr: str = await getattr(self.factory_instance.functions, 'allPairs')(i).call()
+            pair_instance = self._gen_pair_instance(pair_addr)
+            token0 = await getattr(pair_instance.functions, "token0")().call()
+            token1 = await getattr(pair_instance.functions, "token1")().call()
+            t0_info = await self._fetch_erc20(addr=token0)
+            t1_info = await self._fetch_erc20(addr=token1)
+            if not t0_info or not t1_info:
+                lg.warning(f"token0:{token0} or token1{token1} is not a norm erc20 token --> pass")
+                return
+            t0_addr = t0_info['address']
+            t0_symbol = t0_info['symbol']
+            t0_decimal = t0_info['decimal']
+            t1_addr = t1_info['address']
+            t1_symbol = t1_info['symbol']
+            t1_decimal = t1_info['decimal']
+            self._to_save_pair(i, pair_addr, t0_addr, t0_symbol, t0_decimal, t1_addr, t1_symbol, t1_decimal)
+        except Exception as e:
+            lg.error(f"_to_sync_signpair:{e}")
+            pass
 
     def _cal_stable_index(self, t0: str, t1: str) -> int:
         w = self.conf.weth.lower()
@@ -322,10 +341,10 @@ class Task:
     async def _fetch_erc20(self, addr: str) -> dict | None:
         ltoken = self._get_local_erc20(addr)
         if ltoken:
-            lg.info(f"token is exist {ltoken['symbol']}")
+            # lg.info(f"token is exist {ltoken['symbol']}")
             return ltoken
         else:
-            lg.info(f"token is not in local:{addr} -> fetch by remote")
+            lg.info(f"token is not in local:{addr}")
             rtoken = await self._get_remote_erc20(addr)
             self._to_save_erc20(rtoken)
             return rtoken
@@ -354,7 +373,7 @@ class Task:
                 'decimal': decimal
             }
         except Exception as e:
-            lg.error(e)
+            lg.error(f"_get_remote_erc20:{e}")
             return None
 
     def _get_local_erc20(self, addr: str) -> dict | None:
@@ -371,7 +390,9 @@ class Task:
 
     @staticmethod
     def _load_config() -> Config:
-        return load_config("./config.toml")
+        c = load_config("./config.toml")
+        lg.info(c)
+        return c
 
     @staticmethod
     def _read_factory_abi():
@@ -620,5 +641,5 @@ class Task:
 
 async def task():
     lg.info("start to sync ... ...")
-    await Task().debug()
-    # await Task().run()
+    # await Task().debug()
+    await Task().run()
