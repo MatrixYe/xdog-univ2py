@@ -1,4 +1,4 @@
-.PHONY: build start debug stop help
+.PHONY: build start pnl debug stop help
 
 
 ## 编译
@@ -9,7 +9,8 @@ build:
 start:
 	echo 'start'
 	python main.py
-
+pnl:
+	python pnl.py
 stop:
 	echo "stop"
 

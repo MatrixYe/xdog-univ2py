@@ -3,7 +3,7 @@
 # Name:         a 
 # Author:       yepeng
 # Date:         2021/10/22 2:44 下午
-# Description: 
+# Description: uniswap v2 数据同步
 # -------------------------------------------------------------------------------
 import asyncio
 import json
@@ -25,6 +25,8 @@ BASE = "univ2_base"
 TOKENS = "tokens"
 UNIV2_PAIRS = "univ2_pairs"
 UNIV2_EVENT = "univ2_event"
+UNIV2_SWAP = "univ2_swap"
+UNIV2_RAT = "univ2_rat"
 
 
 class Task:
@@ -37,7 +39,7 @@ class Task:
 
         self.db = self._connect_mongo()
         self.rs = self._connect_redis()
-        self.w3 = self._load_eth_client()
+        self.w3 = self._connect_eth_client()
         self.factory_instance = self._gen_factory_instance(self.conf.factory)
 
     # 初始化操作
@@ -76,7 +78,7 @@ class Task:
         return client[self.conf.network]
 
     # 加载以太坊客户端
-    def _load_eth_client(self) -> AsyncWeb3:
+    def _connect_eth_client(self) -> AsyncWeb3:
         return AsyncWeb3(AsyncHTTPProvider(endpoint_uri=self.conf.node_url))
 
     # 获取本地同步最新的uniswap v2 pair index
@@ -86,18 +88,8 @@ class Task:
 
     # 设置最新同步uniswap v2池子索引
     def _set_local_pair_index(self, index: int):
+        lg.info(f"_set_local_pair_index:{index}")
         self._update_base("pair_index", index)
-
-    def _fetch_logs(self, start_block, end_block):
-        try:
-            logs = self.w3.eth.get_logs(filter_params={
-                'fromBlock': start_block,
-                'toBlock': end_block,
-                # 'address': self.w3.to_checksum_address(self.config['tomo_address'])
-            })
-            return logs
-        except Exception as e:
-            lg.error(e)
 
     # 构建factory实例
     def _gen_factory_instance(self, factory_address: str) -> AsyncContract:
@@ -126,7 +118,7 @@ class Task:
     async def run(self):
         self._initsysctrl()
         # 全量同步池子信息
-        # await self._sync_all_pairs()
+        await self._sync_all_pairs(False)
         await self._loop()
 
     async def _loop(self):
@@ -134,27 +126,23 @@ class Task:
         # await asyncio.sleep(3)
 
         while True:
+            await asyncio.sleep(self.conf.sync_interval)
             x = self._get_sync_block()
             y = await self._get_remote_block_number()
             lg.info(f"loop sync local block:{x} remote block:{y}")
             if y == 0:
                 lg.error("failed to get remote block!")
-                await asyncio.sleep(self.conf.sync_interval)
                 continue
             if x > y:
                 lg.warning("local block > remote block")
-                await asyncio.sleep(self.conf.sync_interval)
                 continue
-
             if x == y:
                 print("local block = remote block")
-                await asyncio.sleep(self.conf.sync_interval)
                 continue
             for i in range(x + 1, y + 1):
                 print(f"to scan block {i}")
                 await self._to_scan_block(i)
                 self._set_sync_block(i)
-                return
 
     def _get_pair(self, addr: str):
         return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
@@ -192,17 +180,20 @@ class Task:
         for log in logs:
             tx_hash = log.get("transactionHash").hex()
             contract_addr = log.get('address').lower()
+            # 判断是否来自factory的event
             if contract_addr == self.conf.factory.lower():
                 tx = await self._fetch_tx(tx_hash)
                 if not tx:
                     continue
                 await self._handle_factory_event(ts, tx, log)
                 continue
-            if self._get_pair(contract_addr):
+            # 判断是否来自pair的event
+            pair_obj = self._get_pair(contract_addr)
+            if pair_obj:
                 tx = await self._fetch_tx(tx_hash)
                 if not tx:
                     continue
-                self._handle_pair_event(ts, tx, log)
+                self._handle_pair_event(ts, tx, log, pair_obj)
                 continue
 
     # 获取远程block高度
@@ -228,7 +219,7 @@ class Task:
     def _update_base(self, field: str, new_data: Any):
         self.db[BASE].update_one({'_id': 1}, {'$set': {field: new_data}})
 
-    async def _sync_all_pairs(self):
+    async def _sync_all_pairs(self, debug: bool):
         lg.info(f"sync_all_pairs:{self.conf.full_pair}")
         while self.conf.full_pair:
             x = self._get_local_pair_index()
@@ -245,13 +236,14 @@ class Task:
             for i in range(x + 1, y + 1):
                 await self._to_sync_signpair(i)
                 self._set_local_pair_index(i)
-                if i == x + 3:
+                if debug:
                     lg.info(f"sync_all_pairs is complete!")
                     return
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        await self._to_scan_block(18561172)
+        # await self._sync_all_pairs(debug=True)
+        await self._to_scan_block(18568477)
         # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
         # print(tx)
 
@@ -277,6 +269,14 @@ class Task:
         t1_decimal = t1_info['decimal']
         self._to_save_pair(i, pair_addr, t0_addr, t0_symbol, t0_decimal, t1_addr, t1_symbol, t1_decimal)
 
+    def _cal_stable_index(self, t0: str, t1: str) -> int:
+        w = self.conf.weth.lower()
+        if w == t0.lower():
+            return 0
+        if w == t1.lower():
+            return 1
+        return -1
+
     def _to_save_pair(self,
                       pindex: int,
                       pair_addr: str,
@@ -286,43 +286,38 @@ class Task:
                       t1_addr: str,
                       t1_symbol: str,
                       t1_decimal: int):
-        lg.info(f"to save pair:{pair_addr.lower()}")
-        if t1_symbol in ["WETH", "USDC", "USCT", "DAI"]:
-            # coin is t0
-            data = {
-                '_id': pair_addr.lower(),
-                'pindex': pindex,
-                'pair': pair_addr.lower(),
-                'name': f"{t0_symbol}/{t1_symbol}",
-                'coin_addr': t0_addr.lower(),
-                'coin_symbol': t0_symbol,
-                'coin_decimal': t0_decimal,
-                'stable_addr': t1_addr.lower(),
-                'stable_symbol': t1_symbol,
-                'stable_decimal': t1_decimal
-            }
-            self._insert_docm(UNIV2_PAIRS, data)
-        else:
-            # coin is t1
-            data = {
-                '_id': pair_addr.lower(),
-                'pindex': pindex,
-                'pair': pair_addr.lower(),
-                'name': f"{t1_symbol}{t0_symbol}",
-                'coin_addr': t1_addr.lower(),
-                'coin_symbol': t1_symbol,
-                'coin_decimal': t1_decimal,
-                'stable_addr': t0_addr.lower(),
-                'stable_symbol': t0_symbol,
-                'stable_decimal': t0_decimal
-            }
-            self._insert_docm(UNIV2_PAIRS, data)
+        lg.info(f"save pair:{pair_addr.lower()}")
+        stable_index = self._cal_stable_index(t0_addr, t1_addr)
+        if stable_index == -1:
+            lg.warning(f"this is no weth pair :{pair_addr} pass")
+            return
+        data = {
+            '_id': pair_addr.lower(),
+            'pindex': pindex,
+            'pair': pair_addr.lower(),
+            'name': f"{t0_symbol}/{t1_symbol}" if stable_index == 1 else f"{t1_symbol}/{t0_symbol}",
+            'coin_addr': t0_addr.lower() if stable_index == 1 else t1_addr.lower(),
+            'coin_symbol': t0_symbol if stable_index == 1 else t1_symbol,
+            'coin_decimal': t0_decimal if stable_index == 1 else t1_decimal,
+
+            'stable_addr': t1_addr.lower() if stable_index == 1 else t0_addr,
+            'stable_symbol': t1_symbol if stable_index == 1 else t0_symbol,
+            'stable_decimal': t1_decimal if stable_index == 1 else t0_decimal,
+            'stable_index': stable_index
+        }
+        self._insert_docm(UNIV2_PAIRS, data)
+
+    def _find_and_set(self, coll: str, query: dict, new_data: dict, upsert: bool):
+        try:
+            self.db[coll].find_one_and_update(filter=query, update={'$set': new_data}, upsert=upsert)
+        except Exception as e:
+            lg.error(f"_find_and_set:{new_data} {e}")
 
     def _insert_docm(self, coll: str, data):
         try:
             self.db[coll].insert_one(data)
         except Exception as e:
-            lg.error(e)
+            lg.error(f"_insert_docm:{coll} {e}")
 
     async def _fetch_erc20(self, addr: str) -> dict | None:
         ltoken = self._get_local_erc20(addr)
@@ -338,7 +333,7 @@ class Task:
     def _to_save_erc20(self, rtoken: dict):
         if not rtoken:
             return
-        lg.info(f'to save erc20 token:{rtoken["symbol"]}')
+        lg.info(f'save erc20 token:{rtoken["symbol"]}')
         data = {
             '_id': rtoken['address'].lower(),
             'type': 'erc20',
@@ -416,8 +411,10 @@ class Task:
     def _save_event(self, event: dict):
         try:
             self.db[UNIV2_EVENT].insert_one(event)
+            return True
         except Exception as e:
-            lg.error(e)
+            lg.error(f"_save_event:{e}")
+            return False
 
     # 处理factory的合约event
     async def _handle_factory_event(self, ts: int, tx: dict, log):
@@ -431,7 +428,7 @@ class Task:
                 await self._handle_factory_event_paircreated(ts, tx, log, event_name)
 
     # 处理pair合约的event
-    def _handle_pair_event(self, ts: int, tx: dict, log):
+    def _handle_pair_event(self, ts: int, tx: dict, log, pair_obj):
         topics = log.get('topics')
         if not topics:
             return
@@ -439,11 +436,13 @@ class Task:
             case '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822':
                 event_name = "Swap"
                 lg.info(f"find event Pair:{event_name}")
-                self._handle_pair_event_swap(ts, tx, log, event_name)
+                self._handle_pair_event_swap(ts, tx, log, pair_obj, event_name)
             case '0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1':
                 event_name = "Sync"
                 lg.info(f"find event Pair:{event_name}")
-                self._handle_pair_event_sync(ts, tx, log, event_name)
+                self._handle_pair_event_sync(ts, tx, log, pair_obj, event_name)
+            case _:
+                pass
 
     async def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name):
 
@@ -466,50 +465,47 @@ class Task:
         event['name'] = event_name
         event['ts'] = ts
         event['entity'] = entity
-        self._save_event(event)
+        self._save_event(event)  # 即便插入失败，也更新pair
         # 同步更新pair信息
         # 忽略锚定币非weth的交易池
         if self.conf.weth not in [token0.lower(), token1.lower()]:
+            # 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 WETH
             lg.warning(f"not a Standard Pair:{pair} {token0} {token1}")
             return
+        # 获取token0的基本信息，非标准币不处理
         t0_info = await self._fetch_erc20(token0)
         if not t0_info:
             lg.warning(f"can not up new pair,token0 not erc20:{token0}")
             return
+        # 获取token1的基本信息，非标准币不处理
         t1_info = await self._fetch_erc20(token1)
-        # 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 WETH
         if not t1_info:
             lg.warning(f"can not up new pair,token1 not erc20:{token1}")
             return
-        stab_index = 0 if self.conf.weth.lower() == t0_info['address'] else 1
+        stable_index = self._cal_stable_index(t0_info['address'], t1_info['address'])
         new_pair_data = {
             '_id': pair.lower(),
             'eid': event.get('_id'),
             'pair': pair.lower(),
-            'name': f"{t0_info['symbol']}/{t1_info['symbol']}" if stab_index == 1 else f"{t1_info['symbol']}/{t0_info['symbol']}",
-            'coin_addr': t0_info['address'] if stab_index == 1 else t1_info['address'],
-            'coin_symbol': t0_info['symbol'] if stab_index == 1 else t1_info['symbol'],
-            'coin_decimal': t0_info['decimal'] if stab_index == 1 else t1_info['decimal'],
-            'stable_addr': t0_info['address'] if stab_index == 0 else t1_info['address'],
-            'stable_symbol': t0_info['symbol'] if stab_index == 0 else t1_info['symbol'],
-            'stable_decimal': t0_info['decimal'] if stab_index == 0 else t1_info['decimal'],
+            'pindex': pindex,
+            'name': f"{t0_info['symbol']}/{t1_info['symbol']}" if stable_index == 1 else f"{t1_info['symbol']}/{t0_info['symbol']}",
+            'coin_addr': t0_info['address'] if stable_index == 1 else t1_info['address'],
+            'coin_symbol': t0_info['symbol'] if stable_index == 1 else t1_info['symbol'],
+            'coin_decimal': t0_info['decimal'] if stable_index == 1 else t1_info['decimal'],
+            'stable_addr': t0_info['address'] if stable_index == 0 else t1_info['address'],
+            'stable_symbol': t0_info['symbol'] if stable_index == 0 else t1_info['symbol'],
+            'stable_decimal': t0_info['decimal'] if stable_index == 0 else t1_info['decimal'],
+            'stable_index': stable_index,
             'create_time': ts,
+            'create_block': event['block_number'],
             'create_tx': tx['tx_hash'],
             'creator': tx['from']
         }
+        lg.info(f"save new pair:{pair.lower()}")
         self._find_and_set(UNIV2_PAIRS, {'_id': pair.lower()}, new_pair_data, upsert=True)
+        self._set_local_pair_index(pindex)
 
-    def _find_and_set(self, coll: str, query: dict, new_data: dict, upsert: bool):
-        try:
-            self.db[coll].find_one_and_update(filter=query, update={'$set': new_data}, upsert=upsert)
-        except Exception as e:
-            lg.error(f"_find_and_set:{new_data} {e}")
-
-    @staticmethod
-    def _equal(s1: str, s2: str) -> bool:
-        return s1.lower() == s2.lower()
-
-    def _handle_pair_event_swap(self, ts, tx, log, event_name):
+    def _handle_pair_event_swap(self, ts, tx, log, pair_obj, event_name):
         # ndex_topic_1 address sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, index_topic_2 address to
         event = self._parse_com(log)
         topics = log.get("topics")
@@ -531,10 +527,64 @@ class Task:
             'amount1out': str(amount1out),
             'to': s_to
         }
-        event['entity'] = entity
-        self._save_event(event)
 
-    def _handle_pair_event_sync(self, ts, tx, log, event_name):
+        event['entity'] = entity
+
+        ok = self._save_event(event)  # 如果插入event失败，不更新swap数据
+        if not ok:
+            return
+            # 插入swap数据
+        # lg.info(f"log index:{event['log_index']}")
+        # lg.info(f"sync:{entity}")
+        pair = pair_obj.get('pair')
+        coin_addr = pair_obj.get('coin_addr')
+        coin_symbol = pair_obj.get('coin_symbol')
+        coin_decimal = pair_obj.get('coin_decimal')
+
+        stable_addr = pair_obj.get('stable_addr')
+        stable_symbol = pair_obj.get('stable_symbol')
+        stable_decimal = pair_obj.get('stable_decimal')
+        stable_index = pair_obj.get('stable_index')
+        if stable_index is None:
+            lg.error(f"can not find stable index by pari:{pair}")
+        trader = tx['from']
+        tx_hash = tx['tx_hash']
+        nonce = tx['nonce']
+        a0 = amount0out - amount0in  # 得到t0 数量
+        a1 = amount1out - amount1in  # 得到t1的数量
+
+        amount = abs(a0) / 10 ** coin_decimal if stable_index == 1 else abs(a1) / 10 ** coin_decimal
+        value = abs(a1) / 10 ** stable_decimal if stable_index == 1 else abs(a0) / 10 ** stable_decimal
+        price = value / amount  # 计算成交价格
+        is_buy = (stable_index == 0 and a0 < 0 < a1) or (stable_index == 1 and a1 < 0 < a0)  # 是否买入，根据稳定币的获取是否为负数
+
+        new_swap = {
+            '_id': event['_id'],
+            'eid': event['_id'],
+            'pair': pair.lower(),
+            'trader': trader.lower(),
+            'is_buy': is_buy,
+            'amount': amount,
+            'value': value,
+            'price': price,
+            'coin_addr': coin_addr,
+            'coin_symbol': coin_symbol,
+            'coin_decimal': coin_decimal,
+            'stable_addr': stable_addr,
+            'stable_symbol': stable_symbol,
+            'stable_decimal': stable_decimal,
+            'ts': ts,
+            'block_number': event['block_number'],
+            'tx_hash': tx_hash,
+            'nonce': nonce
+        }
+        self._insert_docm(UNIV2_SWAP, new_swap)
+        self._find_and_set(UNIV2_PAIRS, {'_id': pair.lower()}, {'price': price}, upsert=False)
+        # 如果nonce为0，那么还要加入到老鼠仓记录中
+        if nonce == 0:
+            self._insert_docm(UNIV2_RAT, new_swap)
+
+    def _handle_pair_event_sync(self, ts, tx, log, pair_obj, event_name):
         event = self._parse_com(log)
         event['from'] = tx['from']
         event['name'] = event_name
@@ -548,15 +598,27 @@ class Task:
             'reserve1': str(reserve1),
         }
         event['entity'] = entity
-        self._save_event(event)
+        ok = self._save_event(event)
+        if not ok:
+            return
+        # lg.info(f"log index:{event['log_index']}")
+        # lg.info(f"sync:{entity}")
+
+        # 更新池子储备
+        stable_index = pair_obj.get('stable_index')
+        pair = pair_obj.get('pair')
+        coin_decimal = pair_obj.get('coin_decimal')
+        stable_decimal = pair_obj.get('stable_decimal')
+        coin_reserve = reserve0 / 10 ** coin_decimal if stable_index == 1 else reserve1 / 10 ** coin_decimal
+        stable_reserve = reserve1 / 10 ** stable_decimal if stable_index == 1 else reserve0 / 10 ** stable_decimal
+        new_reserve = {
+            'coin_reserve': coin_reserve,
+            'stable_reserve': stable_reserve,
+        }
+        self._find_and_set(UNIV2_PAIRS, {'_id': pair}, new_reserve, upsert=False)
 
 
 async def task():
     lg.info("start to sync ... ...")
     await Task().debug()
     # await Task().run()
-
-# 测试sync 和swap 18534861
-# 结果地址 https://cn.etherscan.com/address/0xdc42550753f9ec121b416aca8a09e0820fa8df2f#events
-# 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
-# 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
