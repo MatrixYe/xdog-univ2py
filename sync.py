@@ -60,6 +60,9 @@ class Task:
         # event 索引
         self.db[UNIV2_EVENT].create_index([('ts', 1)])
         self.db[UNIV2_EVENT].create_index([('name', 1)])
+        # pair索引
+        self.db[UNIV2_PAIRS].create_index([('create_time', 1)])
+        self.db[UNIV2_PAIRS].create_index([('coin_addr', 1)])
         # swap 集合索引
         self.db[UNIV2_SWAP].create_index([("ts", 1)])
         self.db[UNIV2_SWAP].create_index([("block_number", 1)])
@@ -96,16 +99,6 @@ class Task:
         lg.info(f"_connect_eth_client ... ...")
         return AsyncWeb3(AsyncHTTPProvider(endpoint_uri=self.conf.node_url))
 
-    # 获取本地同步最新的uniswap v2 pair index
-    def _get_local_pair_index(self) -> int:
-        result = self._get_base()
-        return result['pair_index']
-
-    # 设置最新同步uniswap v2池子索引
-    def _set_local_pair_index(self, index: int):
-        lg.info(f"_set_local_pair_index:{index}")
-        self._update_base("pair_index", index)
-
     # 构建factory实例
     def _gen_factory_instance(self, factory_address: str) -> AsyncContract:
         contract_address = self.w3.to_checksum_address(factory_address)
@@ -121,6 +114,41 @@ class Task:
         contract_address = self.w3.to_checksum_address(erc20_address)
         return self.w3.eth.contract(address=contract_address, abi=self._erc20_abi)
 
+    # 获取本地同步最新的uniswap v2 pair index
+    def _get_local_pair_index(self) -> int:
+        result = self._get_base()
+        return result['pair_index']
+
+    # 设置最新同步uniswap v2池子索引
+    def _set_local_pair_index(self, index: int):
+        lg.info(f"_set_local_pair_index:{index}")
+        self._update_base("pair_index", index)
+
+    def _get_pair(self, addr: str):
+        return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
+
+    async def _fetch_tx(self, tx_hash) -> dict | None:
+        tx_cache = await self.rs.get(tx_hash)
+        if tx_cache:
+            # lg.info(f"cache is exist:{tx_hash}")
+            return json.loads(tx_cache)
+        else:
+            tx = await self._get_remote_tx(tx_hash)
+            if not tx:
+                return None
+            data = {'tx_hash': tx_hash.lower(), 'from': tx['from'].lower(), 'nonce': tx['nonce']}
+            await self.rs.set(tx_hash, json.dumps(data), 600)
+            return data
+
+    async def _get_remote_tx(self, tx_hash):
+        try:
+            tx = await self.w3.eth.get_transaction(tx_hash)
+            return tx
+        except Exception as e:
+            lg.error(f"_get_remote_tx:{e}")
+            return None
+        pass
+
     async def _get_remote_pair_index(self) -> int:
         try:
             index = await getattr(self.factory_instance.functions, 'allPairsLength')().call()
@@ -129,38 +157,19 @@ class Task:
             lg.error(f"_get_remote_pair_index:{e}")
             return 0
 
-    # 核心功能代码入口
-    async def run(self):
-        self._initsysctrl()
-        # 全量同步池子信息
-        await self._sync_all_pairs(False)
-        await self._loop()
+    def _set_start_block(self, height: int):
+        self._update_base('sync_block', height)
+        lg.info(f"_set_start_block:{height}")
 
-    async def _loop(self):
+    def _set_sync_block(self, height: int):
+        self._update_base('sync_block', height)
+        lg.info(f"_set_sync_block:{height}")
 
-        while True:
-            await asyncio.sleep(self.conf.sync_interval)
-            x = self._get_sync_block()
-            y = await self._get_remote_block_number()
-            lg.info(f"loop sync local block:{x} remote block:{y}")
-            if y == 0:
-                lg.error("_loop:failed to get remote block!")
-                continue
-            if x > y:
-                lg.warning("_loop:local block > remote block")
-                continue
-            if x == y:
-                continue
-            if x == 0:
-                x = y - 1
-                lg.info(f"_loop:x=0,transf to x=y-1={x},scan by current block")
-                self._set_start_block(x)
+    def _get_base(self):
+        return self.db[BASE].find_one({'_id': 1})
 
-            for i in range(x + 1, y + 1):
-                lg.debug(f"_loop:to scan block {i}")
-                await self._to_scan_block(i)
-                self._set_sync_block(i)
-                await asyncio.sleep(0.2)
+    def _update_base(self, field: str, new_data: Any):
+        self.db[BASE].update_one({'_id': 1}, {'$set': {field: new_data}})
 
     async def _to_scan_block(self, i: int):
         lg.info(f'to scan block:{i}')
@@ -189,31 +198,6 @@ class Task:
                 self._handle_pair_event(ts, tx, log, pair_obj)
                 continue
 
-    def _get_pair(self, addr: str):
-        return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
-
-    async def _fetch_tx(self, tx_hash) -> dict | None:
-        tx_cache = await self.rs.get(tx_hash)
-        if tx_cache:
-            # lg.info(f"cache is exist:{tx_hash}")
-            return json.loads(tx_cache)
-        else:
-            tx = await self._get_remote_tx(tx_hash)
-            if not tx:
-                return None
-            data = {'tx_hash': tx_hash.lower(), 'from': tx['from'].lower(), 'nonce': tx['nonce']}
-            await self.rs.set(tx_hash, json.dumps(data), 600)
-            return data
-
-    async def _get_remote_tx(self, tx_hash):
-        try:
-            tx = await self.w3.eth.get_transaction(tx_hash)
-            return tx
-        except Exception as e:
-            lg.error(f"_get_remote_tx:{e}")
-            return None
-        pass
-
     # 获取远程block高度
     async def _get_remote_block_number(self) -> int:
         try:
@@ -227,42 +211,6 @@ class Task:
     def _get_sync_block(self) -> int:
         base = self._get_base()
         return base.get('sync_block')
-
-    def _set_start_block(self, height: int):
-        self._update_base('sync_block', height)
-        lg.info(f"_set_start_block:{height}")
-
-    def _set_sync_block(self, height: int):
-        self._update_base('sync_block', height)
-        lg.info(f"_set_sync_block:{height}")
-
-    def _get_base(self):
-        return self.db[BASE].find_one({'_id': 1})
-
-    def _update_base(self, field: str, new_data: Any):
-        self.db[BASE].update_one({'_id': 1}, {'$set': {field: new_data}})
-
-    async def _sync_all_pairs(self, debug: bool):
-        lg.info(f"sync_all_pairs:{self.conf.full_pair}")
-        while self.conf.full_pair:
-            x = self._get_local_pair_index()
-            y = await self._get_remote_pair_index()  # 获取远程的pair 最新索引
-            lg.info(f"get local pair index:{x},get remote pair length:{y}")
-            if not y:
-                lg.warning("failed to get remote block!")
-                break
-            if x > y - 1:
-                lg.warning(f"local pair index:{x} > remote pair index!what happen")
-                break
-            if x == y - 1:
-                break
-            for i in range(x + 1, y):
-                await self._to_sync_signpair(i)
-                self._set_local_pair_index(i)
-                if debug:
-                    lg.info(f"sync_all_pairs is complete!")
-                    return
-        lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
         # await self._sync_all_pairs(debug=True)
@@ -290,7 +238,6 @@ class Task:
             self._to_save_pair(i, pair_addr, t0_addr, t0_symbol, t0_decimal, t1_addr, t1_symbol, t1_decimal)
         except Exception as e:
             lg.error(f"_to_sync_signpair:{e}")
-            pass
 
     def _cal_stable_index(self, t0: str, t1: str) -> int:
         w = self.conf.weth.lower()
@@ -604,7 +551,7 @@ class Task:
         }
         self._insert_docm(UNIV2_SWAP, new_swap)
         # 更新pair最新价格
-        self._find_and_set(UNIV2_PAIRS, {'_id': pair.lower()}, {'price': price}, upsert=False)
+        self._find_and_set(UNIV2_PAIRS, {'_id': pair.lower()}, {'price': price, 'update_time': ts}, upsert=False)
         # 如果nonce为0，那么还要加入到老鼠仓记录中
         if nonce == 0:
             self._insert_docm(UNIV2_RAT, new_swap)
@@ -614,26 +561,7 @@ class Task:
 
     # 处理k线数据
     def _parse_kline(self, new_swap: dict):
-        #         new_swap = {
-        #             '_id': event['_id'],
-        #             'eid': event['_id'],
-        #             'pair': pair.lower(),
-        #             'trader': trader.lower(),
-        #             'is_buy': is_buy,
-        #             'amount': amount,
-        #             'value': value,
-        #             'price': price,
-        #             'coin_addr': coin_addr,
-        #             'coin_symbol': coin_symbol,
-        #             'coin_decimal': coin_decimal,
-        #             'stable_addr': stable_addr,
-        #             'stable_symbol': stable_symbol,
-        #             'stable_decimal': stable_decimal,
-        #             'ts': ts,
-        #             'block_number': event['block_number'],
-        #             'tx_hash': tx_hash,
-        #             'nonce': nonce
-        #         }
+
         start_time = 300 * int(new_swap['ts'] / 300)  # 计算k线bar起始点时间戳
         pair = new_swap['pair']
         price = new_swap['price']
@@ -691,8 +619,63 @@ class Task:
         }
         self._find_and_set(UNIV2_PAIRS, {'_id': pair}, new_reserve, upsert=False)
 
+    # 核心功能代码入口
+    async def run(self):
+        self._initsysctrl()
+        await self._sync_all_pairs(False)
+        await self._loop()
+
+    # 迭代扫描区块
+    async def _loop(self):
+
+        while True:
+            await asyncio.sleep(self.conf.sync_interval)
+            x = self._get_sync_block()
+            y = await self._get_remote_block_number()
+            lg.info(f"loop sync local block:{x} remote block:{y}")
+            if y == 0:
+                lg.error("_loop:failed to get remote block!")
+                continue
+            if x > y:
+                lg.warning("_loop:local block > remote block")
+                continue
+            if x == y:
+                continue
+            if x == 0:
+                x = y - 1
+                lg.info(f"_loop:x=0,transf to x=y-1={x},scan by current block")
+                self._set_start_block(x)
+
+            for i in range(x + 1, y + 1):
+                lg.debug(f"_loop:to scan block {i}")
+                await self._to_scan_block(i)
+                self._set_sync_block(i)
+                await asyncio.sleep(0.2)
+
+    async def _sync_all_pairs(self, debug: bool):
+        lg.info(f"sync_all_pairs:{self.conf.full_pair}")
+        while self.conf.full_pair:
+            x = self._get_local_pair_index()
+            y = await self._get_remote_pair_index()  # 获取远程的pair 最新索引
+            lg.info(f"get local pair index:{x},get remote pair length:{y}")
+            if not y:
+                lg.warning("failed to get remote block!")
+                break
+            if x > y - 1:
+                lg.warning(f"local pair index:{x} > remote pair index!what happen")
+                break
+            if x == y - 1:
+                break
+            for i in range(x + 1, y):
+                await self._to_sync_signpair(i)
+                self._set_local_pair_index(i)
+                if debug:
+                    lg.info(f"sync_all_pairs is complete!")
+                    return
+        lg.info(f"sync_all_pairs is complete!")
+
 
 async def task():
     lg.info("start to sync ... ...")
-    await Task().debug()
-    # await Task().run()
+    # await Task().debug()
+    await Task().run()
