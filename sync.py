@@ -27,6 +27,7 @@ UNIV2_PAIRS = "univ2_pairs"
 UNIV2_EVENT = "univ2_event"
 UNIV2_SWAP = "univ2_swap"
 UNIV2_RAT = "univ2_rat"
+UNIV2_KLINE = "univ2_kline"
 
 
 class Task:
@@ -61,11 +62,14 @@ class Task:
         self.db[UNIV2_EVENT].create_index([('name', 1)])
         # swap 集合索引
         self.db[UNIV2_SWAP].create_index([("ts", 1)])
+        self.db[UNIV2_SWAP].create_index([("block_number", 1)])
         self.db[UNIV2_SWAP].create_index([("pair", 1), ("ts", 1)])
         self.db[UNIV2_SWAP].create_index([("trader", 1), ("ts", 1)])
         # 老鼠仓 索引
         self.db[UNIV2_RAT].create_index([("pair", 1)])
         self.db[UNIV2_RAT].create_index([("ts", 1)])
+        # K线索引,时间戳和pair联合唯一索引
+        self.db[UNIV2_KLINE].create_index([('pair', 1), ('start_time', 1)], unique=True)
         # todo  初始化其他集合，索引等操作
 
     def _connect_redis(self):
@@ -158,31 +162,6 @@ class Task:
                 self._set_sync_block(i)
                 await asyncio.sleep(0.2)
 
-    def _get_pair(self, addr: str):
-        return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
-
-    async def _fetch_tx(self, tx_hash) -> dict | None:
-        tx_cache = await self.rs.get(tx_hash)
-        if tx_cache:
-            # lg.info(f"cache is exist:{tx_hash}")
-            return json.loads(tx_cache)
-        else:
-            tx = await self._get_remote_tx(tx_hash)
-            if not tx:
-                return None
-            data = {'tx_hash': tx_hash.lower(), 'from': tx['from'].lower(), 'nonce': tx['nonce']}
-            await self.rs.set(tx_hash, json.dumps(data), 600)
-            return data
-
-    async def _get_remote_tx(self, tx_hash):
-        try:
-            tx = await self.w3.eth.get_transaction(tx_hash)
-            return tx
-        except Exception as e:
-            lg.error(f"_get_remote_tx:{e}")
-            return None
-        pass
-
     async def _to_scan_block(self, i: int):
         lg.info(f'to scan block:{i}')
         block = await self.w3.eth.get_block(i)
@@ -209,6 +188,31 @@ class Task:
                     continue
                 self._handle_pair_event(ts, tx, log, pair_obj)
                 continue
+
+    def _get_pair(self, addr: str):
+        return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
+
+    async def _fetch_tx(self, tx_hash) -> dict | None:
+        tx_cache = await self.rs.get(tx_hash)
+        if tx_cache:
+            # lg.info(f"cache is exist:{tx_hash}")
+            return json.loads(tx_cache)
+        else:
+            tx = await self._get_remote_tx(tx_hash)
+            if not tx:
+                return None
+            data = {'tx_hash': tx_hash.lower(), 'from': tx['from'].lower(), 'nonce': tx['nonce']}
+            await self.rs.set(tx_hash, json.dumps(data), 600)
+            return data
+
+    async def _get_remote_tx(self, tx_hash):
+        try:
+            tx = await self.w3.eth.get_transaction(tx_hash)
+            return tx
+        except Exception as e:
+            lg.error(f"_get_remote_tx:{e}")
+            return None
+        pass
 
     # 获取远程block高度
     async def _get_remote_block_number(self) -> int:
@@ -261,8 +265,8 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
     async def debug(self):
-        await self._sync_all_pairs(debug=True)
-        # await self._to_scan_block(18568477)
+        # await self._sync_all_pairs(debug=True)
+        await self._to_scan_block(18568751)
         # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
 
     async def _to_sync_signpair(self, i: int):
@@ -318,7 +322,6 @@ class Task:
             'coin_addr': t0_addr.lower() if stable_index == 1 else t1_addr.lower(),
             'coin_symbol': t0_symbol if stable_index == 1 else t1_symbol,
             'coin_decimal': t0_decimal if stable_index == 1 else t1_decimal,
-
             'stable_addr': t1_addr.lower() if stable_index == 1 else t0_addr,
             'stable_symbol': t1_symbol if stable_index == 1 else t0_symbol,
             'stable_decimal': t1_decimal if stable_index == 1 else t0_decimal,
@@ -600,10 +603,60 @@ class Task:
             'nonce': nonce
         }
         self._insert_docm(UNIV2_SWAP, new_swap)
+        # 更新pair最新价格
         self._find_and_set(UNIV2_PAIRS, {'_id': pair.lower()}, {'price': price}, upsert=False)
         # 如果nonce为0，那么还要加入到老鼠仓记录中
         if nonce == 0:
             self._insert_docm(UNIV2_RAT, new_swap)
+
+        # 更新kline数据
+        self._parse_kline(new_swap)
+
+    # 处理k线数据
+    def _parse_kline(self, new_swap: dict):
+        #         new_swap = {
+        #             '_id': event['_id'],
+        #             'eid': event['_id'],
+        #             'pair': pair.lower(),
+        #             'trader': trader.lower(),
+        #             'is_buy': is_buy,
+        #             'amount': amount,
+        #             'value': value,
+        #             'price': price,
+        #             'coin_addr': coin_addr,
+        #             'coin_symbol': coin_symbol,
+        #             'coin_decimal': coin_decimal,
+        #             'stable_addr': stable_addr,
+        #             'stable_symbol': stable_symbol,
+        #             'stable_decimal': stable_decimal,
+        #             'ts': ts,
+        #             'block_number': event['block_number'],
+        #             'tx_hash': tx_hash,
+        #             'nonce': nonce
+        #         }
+        start_time = 300 * int(new_swap['ts'] / 300)  # 计算k线bar起始点时间戳
+        pair = new_swap['pair']
+        price = new_swap['price']
+        value = new_swap['value']
+        is_buy = new_swap['is_buy']
+
+        query = {'start_time': start_time, 'pair': pair}
+        update = {
+            '$setOnInsert': {'open_price': price},
+            '$max': {'high_price': price},
+            '$min': {'low_price': price},
+            '$set': {'close_price': price},
+            '$inc': {
+                'txs': 1,
+                'txs_buy': 1 if is_buy else 0,
+                'txs_sell': 1 if not is_buy else 0,
+                'vol': value,
+                'vol_buy': value if is_buy else 0,
+                'vol_sell': value if not is_buy else 0,
+            }
+        }  # 将 txs 字段加 1
+
+        self.db[UNIV2_KLINE].find_one_and_update(filter=query, update=update, upsert=True)
 
     def _handle_pair_event_sync(self, ts, tx, log, pair_obj, event_name):
         event = self._parse_com(log)
@@ -641,5 +694,5 @@ class Task:
 
 async def task():
     lg.info("start to sync ... ...")
-    # await Task().debug()
-    await Task().run()
+    await Task().debug()
+    # await Task().run()
