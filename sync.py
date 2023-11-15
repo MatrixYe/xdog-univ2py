@@ -137,7 +137,7 @@ class Task:
             if not tx:
                 return None
             data = {'tx_hash': tx_hash.lower(), 'from': tx['from'].lower(), 'nonce': tx['nonce']}
-            await self.rs.set(tx_hash, json.dumps(data), 600)
+            await self.rs.set(tx_hash, json.dumps(data), 120)
             return data
 
     async def _get_remote_tx(self, tx_hash):
