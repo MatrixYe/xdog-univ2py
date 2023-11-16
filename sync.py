@@ -645,7 +645,7 @@ class Task:
                 x = y - 1
                 lg.info(f"_loop:x=0,transf to x=y-1={x},scan by current block")
                 self._set_start_block(x)
-
+            self._update_base("remote_block", y)
             for i in range(x + 1, y + 1):
                 lg.debug(f"_loop:to scan block {i}")
                 await self._to_scan_block(i)
