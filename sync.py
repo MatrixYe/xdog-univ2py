@@ -553,7 +553,7 @@ class Task:
         # 更新pair最新价格
         self._find_and_set(UNIV2_PAIRS, {'_id': pair.lower()}, {'price': price, 'update_time': ts}, upsert=False)
         # 如果nonce为0，那么还要加入到老鼠仓记录中
-        if nonce == 0:
+        if nonce == 0 and is_buy:
             self._insert_docm(UNIV2_RAT, new_swap)
 
         # 更新kline数据
