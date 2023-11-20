@@ -406,11 +406,11 @@ class Task:
         match topics[0].hex().lower():
             case '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822':
                 event_name = "Swap"
-                lg.info(f"find event Pair:{event_name}")
+                # lg.info(f"find event Pair:{event_name}")
                 self._handle_pair_event_swap(ts, tx, log, pair_obj, event_name)
             case '0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1':
                 event_name = "Sync"
-                lg.info(f"find event Pair:{event_name}")
+                # lg.info(f"find event Pair:{event_name}")
                 self._handle_pair_event_sync(ts, tx, log, pair_obj, event_name)
             case _:
                 pass
@@ -526,7 +526,11 @@ class Task:
 
         amount = abs(a0) / 10 ** coin_decimal if stable_index == 1 else abs(a1) / 10 ** coin_decimal
         value = abs(a1) / 10 ** stable_decimal if stable_index == 1 else abs(a0) / 10 ** stable_decimal
+        if amount == 0:
+            lg.warning("_save_event:amount is zero!")
+            return
         price = value / amount  # 计算成交价格
+
         is_buy = (stable_index == 0 and a0 < 0 < a1) or (stable_index == 1 and a1 < 0 < a0)  # 是否买入，根据稳定币的获取是否为负数
 
         new_swap = {

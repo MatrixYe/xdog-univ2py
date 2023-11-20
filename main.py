@@ -8,6 +8,8 @@
 import asyncio
 import logging
 
+import requests
+
 from sync import task as sync_task
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -21,7 +23,20 @@ async def main():
         try:
             await coro
         except Exception as e:
-            lg.error(e)
+            lg.error(f"Project:xdog-univ2py\nError:{e}")
+
+
+def push_error(msg: str):
+    url = "https://open.feishu.cn/open-apis/bot/v2/hook/e9078a15-fac0-4957-a76d-cdd2c309a812"
+    text = {
+        "msg_type": "text",
+        "content":
+            {
+                "text": msg
+            }
+    }
+    requests.post(url=url,
+                  json=text)
 
 
 if __name__ == '__main__':
