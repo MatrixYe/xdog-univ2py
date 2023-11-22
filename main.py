@@ -19,13 +19,12 @@ lg = logging.getLogger(__name__)
 async def main():
     # tasks = [sync_task(), parse_task()]
     tasks = [sync_task()]
-    for coro in asyncio.as_completed(tasks):
-        try:
-            await coro
-        except Exception as e:
-            err_msg = f"Project:xdog-univ2py\nError:{str(e)}"
-            lg.error(err_msg)
-            push_error(err_msg)
+    try:
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        err_msg = f"Project:xdog-univ2py\nError:{e}"
+        lg.error(err_msg)
+        push_error(err_msg)
 
 
 def push_error(msg: str):
