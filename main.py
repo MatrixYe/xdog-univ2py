@@ -23,7 +23,9 @@ async def main():
         try:
             await coro
         except Exception as e:
-            lg.error(f"Project:xdog-univ2py\nError:{e}")
+            err_msg = f"Project:xdog-univ2py\nError:{str(e)}"
+            lg.error(err_msg)
+            push_error(err_msg)
 
 
 def push_error(msg: str):
