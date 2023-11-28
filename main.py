@@ -6,23 +6,27 @@
 # Description: 
 # -------------------------------------------------------------------------------
 import logging
+import threading
 import time
 
 import schedule
 
-from deco import catch_exceptions
+from task1 import run as t1
+from task2 import run as t2
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 lg = logging.getLogger(__name__)
 
 
-@catch_exceptions(cancel_on_failure=False)
-def task():
-    a = 1 / 0
+# 并发执行
+def run_threaded(job_func):
+    job_thread = threading.Thread(target=job_func)
+    job_thread.start()
 
 
 if __name__ == '__main__':
-    schedule.every(5).seconds.do(task)
+    schedule.every(5).seconds.do(run_threaded, t1)
+    schedule.every(4).seconds.do(run_threaded, t2)
     while True:
         schedule.run_pending()
         time.sleep(1)
