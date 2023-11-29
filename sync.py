@@ -232,10 +232,15 @@ class Task:
             t0_addr = t0_info['address']
             t0_symbol = t0_info['symbol']
             t0_decimal = t0_info['decimal']
+            t0_total_supply = t0_info.get('total_supply')
+
             t1_addr = t1_info['address']
             t1_symbol = t1_info['symbol']
             t1_decimal = t1_info['decimal']
-            self._to_save_pair(i, pair_addr, t0_addr, t0_symbol, t0_decimal, t1_addr, t1_symbol, t1_decimal)
+            t1_total_supply = t1_info.get('total_supply')
+
+            self._to_save_pair(i, pair_addr, t0_addr, t0_symbol, t0_decimal, t0_total_supply, t1_addr, t1_symbol,
+                               t1_decimal, t1_total_supply)
         except Exception as e:
             lg.error(f"_to_sync_signpair:{e}")
 
@@ -247,15 +252,8 @@ class Task:
             return 1
         return -1
 
-    def _to_save_pair(self,
-                      pindex: int,
-                      pair_addr: str,
-                      t0_addr: str,
-                      t0_symbol: str,
-                      t0_decimal: int,
-                      t1_addr: str,
-                      t1_symbol: str,
-                      t1_decimal: int):
+    def _to_save_pair(self, pindex: int, pair_addr: str, t0_addr: str, t0_symbol: str, t0_decimal: int,
+                      t0_total_supply: int, t1_addr: str, t1_symbol: str, t1_decimal: int, t1_total_supply: int):
         lg.info(f"save pair:{pair_addr.lower()}")
         stable_index = self._cal_stable_index(t0_addr, t1_addr)
         if stable_index == -1:
@@ -269,6 +267,8 @@ class Task:
             'coin_addr': t0_addr.lower() if stable_index == 1 else t1_addr.lower(),
             'coin_symbol': t0_symbol if stable_index == 1 else t1_symbol,
             'coin_decimal': t0_decimal if stable_index == 1 else t1_decimal,
+            'coin_total_supply': t0_total_supply if stable_index == 1 else t1_total_supply,
+
             'stable_addr': t1_addr.lower() if stable_index == 1 else t0_addr,
             'stable_symbol': t1_symbol if stable_index == 1 else t0_symbol,
             'stable_decimal': t1_decimal if stable_index == 1 else t0_decimal,
@@ -308,7 +308,8 @@ class Task:
             'type': 'erc20',
             'address': rtoken['address'].lower(),
             'symbol': rtoken['symbol'],
-            'decimal': rtoken['decimal']
+            'decimal': rtoken['decimal'],
+            'total_supply': rtoken['total_supply']
         }
         self._insert_docm(TOKENS, data)
 
@@ -317,10 +318,12 @@ class Task:
             erc20_instance = self._gen_erc20_instance(addr)
             symbol = await getattr(erc20_instance.functions, "symbol")().call()
             decimal = await getattr(erc20_instance.functions, "decimals")().call()
+            total_supply = await getattr(erc20_instance.functions, "totalSupply")().call()
             return {
                 'address': addr,
                 'symbol': symbol,
-                'decimal': decimal
+                'decimal': decimal,
+                'total_supply': total_supply / 10 ** decimal
             }
         except Exception as e:
             lg.error(f"_get_remote_erc20:{e}")
@@ -334,7 +337,8 @@ class Task:
             return {
                 'address': token.get('address'),
                 'symbol': token.get('symbol'),
-                'decimal': token.get('decimal')
+                'decimal': token.get('decimal'),
+                'total_supply': token.get('total_supply')
             }
         pass
 
@@ -453,19 +457,33 @@ class Task:
         if not t1_info:
             lg.warning(f"can not up new pair,token1 not erc20:{token1}")
             return
-        stable_index = self._cal_stable_index(t0_info['address'], t1_info['address'])
+        t0_address = t0_info['address']
+        t1_address = t1_info['address']
+
+        t0_symbol = t0_info['symbol']
+        t1_symbol = t1_info['symbol']
+
+        t0_decimal = t0_info['decimal']
+        t1_decimal = t1_info['decimal']
+
+        t0_total_supply = t0_info['total_supply']
+        t1_total_supply = t1_info['total_supply']
+
+        stable_index = self._cal_stable_index(t0_address, t1_address)
+
         new_pair_data = {
             '_id': pair.lower(),
             'eid': event.get('_id'),
             'pair': pair.lower(),
             'pindex': pindex,
-            'name': f"{t0_info['symbol']}/{t1_info['symbol']}" if stable_index == 1 else f"{t1_info['symbol']}/{t0_info['symbol']}",
-            'coin_addr': t0_info['address'] if stable_index == 1 else t1_info['address'],
-            'coin_symbol': t0_info['symbol'] if stable_index == 1 else t1_info['symbol'],
-            'coin_decimal': t0_info['decimal'] if stable_index == 1 else t1_info['decimal'],
-            'stable_addr': t0_info['address'] if stable_index == 0 else t1_info['address'],
-            'stable_symbol': t0_info['symbol'] if stable_index == 0 else t1_info['symbol'],
-            'stable_decimal': t0_info['decimal'] if stable_index == 0 else t1_info['decimal'],
+            'name': f"{t0_symbol}/{t1_symbol}" if stable_index == 1 else f"{t1_symbol}/{t0_symbol}",
+            'coin_addr': t0_address if stable_index == 1 else t1_address,
+            'coin_symbol': t0_symbol if stable_index == 1 else t1_symbol,
+            'coin_decimal': t0_decimal if stable_index == 1 else t1_decimal,
+            'coin_total_supply': t0_total_supply if stable_index == 1 else t1_total_supply,
+            'stable_addr': t0_address if stable_index == 0 else t1_address,
+            'stable_symbol': t0_symbol if stable_index == 0 else t1_symbol,
+            'stable_decimal': t0_decimal if stable_index == 0 else t1_decimal,
             'stable_index': stable_index,
             'create_time': ts,
             'create_block': event['block_number'],
