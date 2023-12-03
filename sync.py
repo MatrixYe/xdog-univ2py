@@ -127,6 +127,7 @@ class Task:
         return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
 
     def _fetch_tx(self, tx_hash) -> dict | None:
+        # tx_cache = self.rs.get(tx_hash)
         tx_cache = self.rs.get(tx_hash)
         if tx_cache:
             # lg.info(f"cache is exist:{tx_hash}")
@@ -214,14 +215,6 @@ class Task:
     def _get_sync_block(self) -> int:
         base = self._get_base()
         return base.get('sync_block')
-
-    def debug(self):
-        # self._sync_all_pairs(debug=True)
-        # self._to_scan_block(18568751)
-        # tx = self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
-        self.rs.set("hello", int(time.time()), ex=14)
-        value = self.rs.get("hello")
-        print(value)
 
     def _to_sync_signpair(self, i: int):
         lg.info(f"to sync sign pair index:{i}")
@@ -705,5 +698,5 @@ class Task:
 
 if __name__ == '__main__':
     lg.info("start to sync ... ...")
-    # Task().run()
-    Task().debug()
+    Task().run()
+    # Task().debug()
