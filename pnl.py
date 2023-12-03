@@ -18,5 +18,5 @@ from config import load_config
 f = load_config('./config.toml')
 
 if __name__ == '__main__':
-    print("this is sync。。。 。。。")
+    print("this is pnl。。。 。。。")
     print(f)
