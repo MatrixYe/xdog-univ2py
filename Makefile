@@ -1,21 +1,21 @@
-.PHONY: build start pnl debug stop help
+.PHONY: build sync pnl debug stop help
 
 
 ## 编译
 build:
 	echo 'biild'
-	pip install -e .
 
-## 启动
+## 启动同步器
 sync:
 	echo 'start'
 	python sync.py
 
+## 启动盈利统计任务
 pnl:
 	echo "pnl"
 	python pnl.py
 
-
+## 停止
 stop:
 	echo "stop"
 
