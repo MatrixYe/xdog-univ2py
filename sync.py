@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-#
 # -------------------------------------------------------------------------------
-# Name:         a 
+# Name:         a
 # Author:       yepeng
 # Date:         2021/10/22 2:44 下午
 # Description: uniswap v2 数据同步
 # -------------------------------------------------------------------------------
-import asyncio
 import json
 import logging
+import time
 from typing import Any
 
-import aioredis
 from eth_abi import abi
 from pymongo import MongoClient
-from web3 import AsyncWeb3, AsyncHTTPProvider
-from web3.contract import AsyncContract
+from redis import StrictRedis
+from web3 import Web3, HTTPProvider
+from web3.contract import Contract
 
 from config import load_config, Config
 
@@ -73,15 +73,14 @@ class Task:
         self.db[UNIV2_RAT].create_index([("ts", 1)])
         # K线索引,时间戳和pair联合唯一索引
         self.db[UNIV2_KLINE].create_index([('pair', 1), ('start_time', 1)], unique=True)
-        # todo  初始化其他集合，索引等操作
 
-    def _connect_redis(self):
+    def _connect_redis(self) -> StrictRedis:
         lg.info("_connect_eth_client... ...")
         host = self.conf.redis.host
         port = self.conf.redis.port
         password = self.conf.redis.password
         db = self.conf.redis.db
-        redis_client = aioredis.StrictRedis(host=host, port=port, password=password, db=db, decode_responses=True)
+        redis_client = StrictRedis(host=host, port=port, password=password, db=db, decode_responses=True)
         return redis_client
 
     # 获取数据库，根据网络名称命名，如ethereum，这样可支持多链数据同步
@@ -95,22 +94,22 @@ class Task:
         return client[self.conf.network]
 
     # 加载以太坊客户端
-    def _connect_eth_client(self) -> AsyncWeb3:
+    def _connect_eth_client(self) -> Web3:
         lg.info(f"_connect_eth_client ... ...")
-        return AsyncWeb3(AsyncHTTPProvider(endpoint_uri=self.conf.node_url))
+        return Web3(HTTPProvider(endpoint_uri=self.conf.node_url))
 
     # 构建factory实例
-    def _gen_factory_instance(self, factory_address: str) -> AsyncContract:
+    def _gen_factory_instance(self, factory_address: str) -> Contract:
         contract_address = self.w3.to_checksum_address(factory_address)
         return self.w3.eth.contract(address=contract_address, abi=self._factory_abi)
 
     # 构建pair实例
-    def _gen_pair_instance(self, pair_address: str) -> AsyncContract:
+    def _gen_pair_instance(self, pair_address: str) -> Contract:
         contract_address = self.w3.to_checksum_address(pair_address)
         return self.w3.eth.contract(address=contract_address, abi=self._pair_abi)
 
     # 构建erc20 tolen 实例
-    def _gen_erc20_instance(self, erc20_address: str) -> AsyncContract:
+    def _gen_erc20_instance(self, erc20_address: str) -> Contract:
         contract_address = self.w3.to_checksum_address(erc20_address)
         return self.w3.eth.contract(address=contract_address, abi=self._erc20_abi)
 
@@ -127,31 +126,35 @@ class Task:
     def _get_pair(self, addr: str):
         return self.db[UNIV2_PAIRS].find_one({'_id': addr.lower()})
 
-    async def _fetch_tx(self, tx_hash) -> dict | None:
-        tx_cache = await self.rs.get(tx_hash)
+    def _fetch_tx(self, tx_hash) -> dict | None:
+        tx_cache = self.rs.get(tx_hash)
         if tx_cache:
             # lg.info(f"cache is exist:{tx_hash}")
             return json.loads(tx_cache)
         else:
-            tx = await self._get_remote_tx(tx_hash)
+            tx = self._get_remote_tx(tx_hash)
             if not tx:
                 return None
-            data = {'tx_hash': tx_hash.lower(), 'from': tx['from'].lower(), 'nonce': tx['nonce']}
-            await self.rs.set(tx_hash, json.dumps(data), 120)
+            data = {
+                'tx_hash': tx_hash.lower(),
+                'from': tx['from'].lower(),
+                'nonce': tx['nonce']
+            }
+            self.rs.set(tx_hash, json.dumps(data), 120)
             return data
 
-    async def _get_remote_tx(self, tx_hash):
+    def _get_remote_tx(self, tx_hash):
         try:
-            tx = await self.w3.eth.get_transaction(tx_hash)
+            tx = self.w3.eth.get_transaction(tx_hash)
             return tx
         except Exception as e:
             lg.error(f"_get_remote_tx:{e}")
             return None
         pass
 
-    async def _get_remote_pair_index(self) -> int:
+    def _get_remote_pair_index(self) -> int:
         try:
-            index = await getattr(self.factory_instance.functions, 'allPairsLength')().call()
+            index = getattr(self.factory_instance.functions, 'allPairsLength')().call()
             return index
         except Exception as e:
             lg.error(f"_get_remote_pair_index:{e}")
@@ -171,11 +174,11 @@ class Task:
     def _update_base(self, field: str, new_data: Any):
         self.db[BASE].update_one({'_id': 1}, {'$set': {field: new_data}})
 
-    async def _to_scan_block(self, i: int):
+    def _to_scan_block(self, i: int):
         lg.info(f'to scan block:{i}')
-        block = await self.w3.eth.get_block(i)
+        block = self.w3.eth.get_block(i)
         ts = block['timestamp']
-        logs = await self.w3.eth.get_logs(filter_params={
+        logs = self.w3.eth.get_logs(filter_params={
             'fromBlock': i,
             'toBlock': i,
         })
@@ -184,24 +187,24 @@ class Task:
             contract_addr = log.get('address').lower()
             # 判断是否来自factory的event
             if contract_addr == self.conf.factory.lower():
-                tx = await self._fetch_tx(tx_hash)
+                tx = self._fetch_tx(tx_hash)
                 if not tx:
                     continue
-                await self._handle_factory_event(ts, tx, log)
+                self._handle_factory_event(ts, tx, log)
                 continue
             # 判断是否来自pair的event
             pair_obj = self._get_pair(contract_addr)
             if pair_obj:
-                tx = await self._fetch_tx(tx_hash)
+                tx = self._fetch_tx(tx_hash)
                 if not tx:
                     continue
                 self._handle_pair_event(ts, tx, log, pair_obj)
                 continue
 
     # 获取远程block高度
-    async def _get_remote_block_number(self) -> int:
+    def _get_remote_block_number(self) -> int:
         try:
-            num = await self.w3.eth.block_number
+            num = self.w3.eth.block_number
             return num
         except Exception as e:
             lg.error(f"_get_remote_block_number:{e}")
@@ -212,20 +215,23 @@ class Task:
         base = self._get_base()
         return base.get('sync_block')
 
-    async def debug(self):
-        # await self._sync_all_pairs(debug=True)
-        await self._to_scan_block(18568751)
-        # tx = await self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
+    def debug(self):
+        # self._sync_all_pairs(debug=True)
+        # self._to_scan_block(18568751)
+        # tx = self._fetch_tx("0x406df6e4f04d337e323b7710c6a6dfea34b6967177b31175c2909efdfd83b32f")
+        self.rs.set("hello", int(time.time()), ex=14)
+        value = self.rs.get("hello")
+        print(value)
 
-    async def _to_sync_signpair(self, i: int):
+    def _to_sync_signpair(self, i: int):
         lg.info(f"to sync sign pair index:{i}")
         try:
-            pair_addr: str = await getattr(self.factory_instance.functions, 'allPairs')(i).call()
+            pair_addr: str = getattr(self.factory_instance.functions, 'allPairs')(i).call()
             pair_instance = self._gen_pair_instance(pair_addr)
-            token0 = await getattr(pair_instance.functions, "token0")().call()
-            token1 = await getattr(pair_instance.functions, "token1")().call()
-            t0_info = await self._fetch_erc20(addr=token0)
-            t1_info = await self._fetch_erc20(addr=token1)
+            token0 = getattr(pair_instance.functions, "token0")().call()
+            token1 = getattr(pair_instance.functions, "token1")().call()
+            t0_info = self._fetch_erc20(addr=token0)
+            t1_info = self._fetch_erc20(addr=token1)
             if not t0_info or not t1_info:
                 lg.warning(f"token0:{token0} or token1{token1} is not a norm erc20 token --> pass")
                 return
@@ -288,14 +294,14 @@ class Task:
         except Exception as e:
             lg.error(f"_insert_docm:{coll} {e}")
 
-    async def _fetch_erc20(self, addr: str) -> dict | None:
+    def _fetch_erc20(self, addr: str) -> dict | None:
         ltoken = self._get_local_erc20(addr)
         if ltoken:
             # lg.info(f"token is exist {ltoken['symbol']}")
             return ltoken
         else:
             lg.info(f"token is not in local:{addr}")
-            rtoken = await self._get_remote_erc20(addr)
+            rtoken = self._get_remote_erc20(addr)
             self._to_save_erc20(rtoken)
             return rtoken
 
@@ -313,12 +319,12 @@ class Task:
         }
         self._insert_docm(TOKENS, data)
 
-    async def _get_remote_erc20(self, addr: str) -> dict | None:
+    def _get_remote_erc20(self, addr: str) -> dict | None:
         try:
             erc20_instance = self._gen_erc20_instance(addr)
-            symbol = await getattr(erc20_instance.functions, "symbol")().call()
-            decimal = await getattr(erc20_instance.functions, "decimals")().call()
-            total_supply = await getattr(erc20_instance.functions, "totalSupply")().call()
+            symbol = getattr(erc20_instance.functions, "symbol")().call()
+            decimal = getattr(erc20_instance.functions, "decimals")().call()
+            total_supply = getattr(erc20_instance.functions, "totalSupply")().call()
             return {
                 'address': addr,
                 'symbol': symbol,
@@ -392,7 +398,7 @@ class Task:
             return False
 
     # 处理factory的合约event
-    async def _handle_factory_event(self, ts: int, tx: dict, log):
+    def _handle_factory_event(self, ts: int, tx: dict, log):
         topics = log.get('topics')
         if not topics:
             return
@@ -400,7 +406,7 @@ class Task:
             case '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9':
                 event_name = "PairCreated"
                 lg.info(f"find event Factoy:{event_name}")
-                await self._handle_factory_event_paircreated(ts, tx, log, event_name)
+                self._handle_factory_event_paircreated(ts, tx, log, event_name)
 
     # 处理pair合约的event
     def _handle_pair_event(self, ts: int, tx: dict, log, pair_obj):
@@ -419,7 +425,7 @@ class Task:
             case _:
                 pass
 
-    async def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name):
+    def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name):
 
         event = self._parse_com(log)
         arg_types = ['address', 'uint256']
@@ -448,12 +454,12 @@ class Task:
             lg.warning(f"not a Standard Pair:{pair} {token0} {token1}")
             return
         # 获取token0的基本信息，非标准币不处理
-        t0_info = await self._fetch_erc20(token0)
+        t0_info = self._fetch_erc20(token0)
         if not t0_info:
             lg.warning(f"can not up new pair,token0 not erc20:{token0}")
             return
         # 获取token1的基本信息，非标准币不处理
-        t1_info = await self._fetch_erc20(token1)
+        t1_info = self._fetch_erc20(token1)
         if not t1_info:
             lg.warning(f"can not up new pair,token1 not erc20:{token1}")
             return
@@ -642,18 +648,18 @@ class Task:
         self._find_and_set(UNIV2_PAIRS, {'_id': pair}, new_reserve, upsert=False)
 
     # 核心功能代码入口
-    async def run(self):
+    def run(self):
         self._initsysctrl()
-        await self._sync_all_pairs(False)
-        await self._loop()
+        self._sync_all_pairs(False)
+        self._loop()
 
     # 迭代扫描区块
-    async def _loop(self):
+    def _loop(self):
 
         while True:
-            await asyncio.sleep(self.conf.sync_interval)
+            time.sleep(self.conf.sync_interval)
             x = self._get_sync_block()
-            y = await self._get_remote_block_number()
+            y = self._get_remote_block_number()
             lg.info(f"loop sync local block:{x} remote block:{y}")
             if y == 0:
                 lg.error("_loop:failed to get remote block!")
@@ -670,15 +676,15 @@ class Task:
             self._update_base("remote_block", y)
             for i in range(x + 1, y + 1):
                 lg.debug(f"_loop:to scan block {i}")
-                await self._to_scan_block(i)
+                self._to_scan_block(i)
                 self._set_sync_block(i)
-                await asyncio.sleep(0.2)
+                time.sleep(0.2)
 
-    async def _sync_all_pairs(self, debug: bool):
+    def _sync_all_pairs(self, debug: bool):
         lg.info(f"sync_all_pairs:{self.conf.full_pair}")
         while self.conf.full_pair:
             x = self._get_local_pair_index()
-            y = await self._get_remote_pair_index()  # 获取远程的pair 最新索引
+            y = self._get_remote_pair_index()  # 获取远程的pair 最新索引
             lg.info(f"get local pair index:{x},get remote pair length:{y}")
             if not y:
                 lg.warning("failed to get remote block!")
@@ -689,7 +695,7 @@ class Task:
             if x == y - 1:
                 break
             for i in range(x + 1, y):
-                await self._to_sync_signpair(i)
+                self._to_sync_signpair(i)
                 self._set_local_pair_index(i)
                 if debug:
                     lg.info(f"sync_all_pairs is complete!")
@@ -697,7 +703,7 @@ class Task:
         lg.info(f"sync_all_pairs is complete!")
 
 
-async def task():
+if __name__ == '__main__':
     lg.info("start to sync ... ...")
-    # await Task().debug()
-    await Task().run()
+    # Task().run()
+    Task().debug()

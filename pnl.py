@@ -7,13 +7,16 @@
 # -------------------------------------------------------------------------------
 
 # 定时任务，计算pnl
-from pymongo import MongoClient
 
 from config import load_config
 
-conf = load_config('./config.toml')
-mg = MongoClient(host=conf.mongo.host, port=conf.mongo.port, password=conf.mongo.password)
+# conf = load_config('./config.toml')
+# mg = MongoClient(host=conf.mongo.host, port=conf.mongo.port, password=conf.mongo.password)
+# mg = utils.connect_mongo(host=conf.mongo.host, port=conf.mongo.port, username=conf.mongo.username,
+#                          password=conf.mongo.password)
 
+f = load_config('./config.toml')
 
-def cal_pnl():
-    pass
+if __name__ == '__main__':
+    print("this is sync。。。 。。。")
+    print(f)

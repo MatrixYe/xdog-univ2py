@@ -33,16 +33,12 @@ class Config(BaseModel):
     node_url: HttpUrl
     start_block: int
     sync_interval: int
-    sync_range: int
-
-    reparse: bool
-    parse_range: int
-    parse_interval: int
 
     mongo: MongoConfig
     redis: RedisConfig
 
 
 def load_config(file_path: str) -> Config:
-    c = Config.parse_obj(toml.load(file_path))
+    f = toml.load(file_path)
+    c = Config.parse_obj(f)
     return c

@@ -3,14 +3,19 @@
 
 ## 编译
 build:
-	echo 'todo'
+	echo 'biild'
+	pip install -e .
 
 ## 启动
-start:
+sync:
 	echo 'start'
-	python main.py
+	python sync.py
+
 pnl:
+	echo "pnl"
 	python pnl.py
+
+
 stop:
 	echo "stop"
 
