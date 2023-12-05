@@ -10,13 +10,12 @@ import logging
 import time
 from typing import Any
 
+from config import load_config, Config
 from eth_abi import abi
 from pymongo import MongoClient
 from redis import StrictRedis
 from web3 import Web3, HTTPProvider
 from web3.contract import Contract
-
-from config import load_config, Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 lg = logging.getLogger(__name__)

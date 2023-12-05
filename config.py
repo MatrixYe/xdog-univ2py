@@ -5,6 +5,8 @@
 # Date:         2021/10/22 2:44 下午
 # Description: 
 # -------------------------------------------------------------------------------
+import logging
+
 import toml
 from pydantic import BaseModel, HttpUrl
 
@@ -39,6 +41,10 @@ class Config(BaseModel):
 
 
 def load_config(file_path: str) -> Config:
-    f = toml.load(file_path)
-    c = Config.parse_obj(f)
-    return c
+    try:
+        f = toml.load(file_path)
+        c = Config.parse_obj(f)
+        return c
+    except Exception as e:
+        logging.error(e)
+        exit()

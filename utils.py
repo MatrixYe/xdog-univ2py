@@ -6,6 +6,7 @@
 # Description: 
 # -------------------------------------------------------------------------------
 import re
+import time
 
 import requests
 from pymongo import MongoClient
@@ -46,3 +47,9 @@ def send_feishu(url: str, msg: str):
             }
     }
     requests.post(url=url, json=text)
+
+
+def now_date(format_str="%Y%m%d", delay=0):
+    t = time.localtime(time.time() - delay)
+    date = time.strftime(format_str, t)
+    return date

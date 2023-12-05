@@ -1,6 +1,6 @@
 .PHONY: build sync pnl debug stop help
 
-
+#c=""
 ## 编译
 build:
 	echo 'biild'
@@ -12,8 +12,7 @@ sync:
 
 ## 启动盈利统计任务
 pnl:
-	echo "pnl"
-	python pnl.py
+	python pnl.py $(c)
 
 ## 停止
 stop:
