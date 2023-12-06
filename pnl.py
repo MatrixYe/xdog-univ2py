@@ -10,6 +10,7 @@ import sys
 import time
 
 import config
+import schedule
 import utils
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -35,12 +36,11 @@ class Task:
 
     def _create_index(self):
         lg.info("create index...")
-        self.db[UNIV2_TEMP].create_index([('trader', 1)])
-        self.db[UNIV2_TEMP].create_index([('pair', 1)])
+        self.db[UNIV2_TEMP].create_index([('trader', 1), ('pair', 1)])
 
         self.db[UNIV2_PNL].create_index([('date', 1)])
         self.db[UNIV2_PNL].create_index([('trader', 1)])
-        self.db[UNIV2_PNL].create_index([('pnl', -1)])
+        self.db[UNIV2_PNL].create_index([('rea_pnl', -1)])
 
     @staticmethod
     def cal_st_et(day: int):
@@ -151,9 +151,6 @@ class Task:
 
     def _state_swaps(self):
         st, et = self.cal_st_et(day=self.day)
-        et = 1701792000
-        st = 1701792000 - 3 * 86400
-
         lg.info(f"start time:{st} end time:{et}")
         query = {
             'ts': {
@@ -191,25 +188,25 @@ class Task:
         while skip < total:
             lg.info(
                 f"total={total} skip={skip} batch={batch_size} progress={round(min(100 * (skip + batch_size) / total, 100), 2)}%")
-            batch_documents = self.db[UNIV2_TEMP].find(projection={'_id': 0}).sort("_id").skip(skip).limit(batch_size)
+            batch_documents = self.db[UNIV2_TEMP].find(projection={'_id': 0}).sort([('_id', 1)]).skip(skip).limit(
+                batch_size)
             for temp in batch_documents:
-                # print(temp)
                 self._handle_pnl(temp)
 
             skip += batch_size
         lg.info(f"complete hadle pnl.")
 
     def _handle_pnl(self, temp):
-
         trader = temp.get('trader')
         pair = temp.get('pair')
         hold = temp.get('hold')
         avg_buy_price = temp.get('avg_buy_price')
         txs = temp.get('txs')
         rea_pnl = temp.get('rea_pnl')
-        flo_pnl = hold * (self.prices[pair] - avg_buy_price)
+        current_price = self.prices[pair]
+        flo_pnl = hold * (current_price - avg_buy_price)
         pnl = rea_pnl + flo_pnl
-        if hold < 0:
+        if hold < 0 or current_price > 100:
             return
         query = {
             'date': self.now_date,
@@ -221,7 +218,7 @@ class Task:
                 'rea_pnl': rea_pnl,
                 'flo_pnl': flo_pnl,
                 'pnl': pnl,
-                'win': 1 if pnl > 0 else 0,
+                'win': 1 if rea_pnl > 0 else 0,
                 'kind': 1
             },
             '$push': {
@@ -230,11 +227,33 @@ class Task:
         }
         self.db[UNIV2_PNL].find_one_and_update(filter=query, update=update, upsert=True)
 
-    def run(self):
+    def _filter_pnl(self):
+        lg.info("to filter pnl... ...")
+        query = {'date': self.now_date}
+        projection = {"_id": 1, "rea_pnl": 1}  # 保留 _id 和 pnl 字段，用于后续删除
+        result = self.db[UNIV2_PNL].find(filter=query, projection=projection).sort([('rea_pnl', -1)]).limit(1000)
+        ids_to_keep = [document["_id"] for document in result]
+        delete_query = {'date': self.now_date, "_id": {"$nin": ids_to_keep}}
+        self.db[UNIV2_PNL].delete_many(delete_query)
+
+    def job(self):
         self._delete_history()
         self._create_index()
         self._state_swaps()
         self._state_pnl()
+        self._filter_pnl()
+
+    def testjob(self):
+        print("this is test jon!!!")
+        pass
+
+    def run(self):
+        lg.info("start job,good luck!")
+        schedule.every().day.at("00:02").do(self.job)  # 每日更新一次
+        # schedule.every().day.at("17:14").do(self.testjob)
+        while True:
+            schedule.run_pending()
+            time.sleep(0.1)
 
 
 def c_arg() -> str:
@@ -246,7 +265,6 @@ def c_arg() -> str:
 
 if __name__ == '__main__':
     c = c_arg()
-    # c = c_arg()
     lg.info(f"input config file path:{c}")
     task = Task(c)
     task.run()
