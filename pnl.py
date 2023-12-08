@@ -9,8 +9,9 @@ import logging
 import sys
 import time
 
-import config
 import schedule
+
+import config
 import utils
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -235,6 +236,7 @@ class Task:
         ids_to_keep = [document["_id"] for document in result]
         delete_query = {'date': self.now_date, "_id": {"$nin": ids_to_keep}}
         self.db[UNIV2_PNL].delete_many(delete_query)
+        lg.info("filter pnl complent... ...")
 
     def job(self):
         self._delete_history()
@@ -245,12 +247,12 @@ class Task:
 
     def testjob(self):
         print("this is test jon!!!")
-        pass
+        self._state_pnl()
+        self._filter_pnl()
 
     def run(self):
         lg.info("start job,good luck!")
         schedule.every().day.at("00:02").do(self.job)  # 每日更新一次
-        # schedule.every().day.at("17:14").do(self.testjob)
         while True:
             schedule.run_pending()
             time.sleep(0.1)
