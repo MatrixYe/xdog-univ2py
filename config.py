@@ -31,6 +31,7 @@ class Config(BaseModel):
     factory: str
     weth: str
     full_pair: bool
+    skip_history: bool
 
     node_url: HttpUrl
     start_block: int

@@ -234,9 +234,12 @@ class Task:
         projection = {"_id": 1, "rea_pnl": 1}  # 保留 _id 和 pnl 字段，用于后续删除
         result = self.db[UNIV2_PNL].find(filter=query, projection=projection).sort([('rea_pnl', -1)]).limit(1000)
         ids_to_keep = [document["_id"] for document in result]
-        delete_query = {'date': self.now_date, "_id": {"$nin": ids_to_keep}}
+        # delete_query = {'date': self.now_date, "_id": {"$nin": ids_to_keep}}
+        delete_query = {"_id": {"$nin": ids_to_keep}}
+        lg.info(f"ids_to_keep:{len(ids_to_keep)}")
         self.db[UNIV2_PNL].delete_many(delete_query)
-        lg.info("filter pnl complent... ...")
+        dc = self.db[UNIV2_PNL].count_documents(filter={'date': self.now_date})
+        lg.info(f"filter UNIV2_PNL {self.now_date} doc:{dc}... ...")
 
     def job(self):
         self._delete_history()

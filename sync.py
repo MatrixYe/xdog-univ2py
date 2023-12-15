@@ -10,12 +10,13 @@ import logging
 import time
 from typing import Any
 
-from config import load_config, Config
 from eth_abi import abi
 from pymongo import MongoClient
 from redis import StrictRedis
 from web3 import Web3, HTTPProvider
 from web3.contract import Contract
+
+from config import load_config, Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 lg = logging.getLogger(__name__)
@@ -266,11 +267,11 @@ class Task:
             'coin_symbol': t0_symbol if stable_index == 1 else t1_symbol,
             'coin_decimal': t0_decimal if stable_index == 1 else t1_decimal,
             'coin_total_supply': t0_total_supply if stable_index == 1 else t1_total_supply,
-
             'stable_addr': t1_addr.lower() if stable_index == 1 else t0_addr,
             'stable_symbol': t1_symbol if stable_index == 1 else t0_symbol,
             'stable_decimal': t1_decimal if stable_index == 1 else t0_decimal,
-            'stable_index': stable_index
+            'stable_index': stable_index,
+            'create_time': int(time.time()) - 18000  # todo 记得屏蔽会修改此处
         }
         self._insert_docm(UNIV2_PAIRS, data)
 
@@ -587,6 +588,7 @@ class Task:
         price = new_swap['price']
         value = new_swap['value']
         is_buy = new_swap['is_buy']
+        trader = new_swap['trader']
 
         query = {'start_time': start_time, 'pair': pair}
         update = {
@@ -601,7 +603,8 @@ class Task:
                 'vol': value,
                 'vol_buy': value if is_buy else 0,
                 'vol_sell': value if not is_buy else 0,
-            }
+            },
+            '$addToSet': {'trader': trader}
         }  # 将 txs 字段加 1
 
         self.db[UNIV2_KLINE].find_one_and_update(filter=query, update=update, upsert=True)
@@ -647,6 +650,10 @@ class Task:
 
     # 迭代扫描区块
     def _loop(self):
+        if self.conf.skip_history:
+            lg.info("skip_history is true!sync by current block height")
+            remote_height = self._get_remote_block_number()
+            self._set_sync_block(remote_height)
 
         while True:
             time.sleep(self.conf.sync_interval)
@@ -661,6 +668,8 @@ class Task:
                 continue
             if x == y:
                 continue
+
+                pass
             if x == 0:
                 x = y - 1
                 lg.info(f"_loop:x=0,transf to x=y-1={x},scan by current block")
