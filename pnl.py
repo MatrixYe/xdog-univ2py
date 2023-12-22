@@ -25,15 +25,19 @@ UNIV2_PAIRS = 'univ2_pairs'
 class Task:
     def __init__(self, c_path: str):
         self.conf = config.load_config(c_path)
-        self.db = self._get_database()
+        self.db = self._get_mongo_client()
+        self.rds = self._get_redis_client()
         self.day = 3
 
         self.batch_size = 1000
         self.now_date = utils.now_date()
 
-    def _get_database(self):
+    def _get_mongo_client(self):
         mg = utils.connect_mongo(**self.conf.mongo.dict())
         return mg[self.conf.network]
+
+    def _get_redis_client(self):
+        return utils.connect_redis(**self.conf.redis.dict())
 
     def _create_index(self):
         lg.info("create index...")
@@ -56,7 +60,6 @@ class Task:
             self._insert_pnl(swap)
         else:
             self._update_pnl(holder, swap)
-            pass
 
     def _insert_pnl(self, swap):
         trader = swap.get('trader')
@@ -179,10 +182,11 @@ class Task:
         pairs = self.db[UNIV2_TEMP].distinct(key='pair')
         # print(pairs)
         prices = self.db[UNIV2_PAIRS].find(filter={'_id': {'$in': pairs}}, projection={'_id': 1, 'price': 1})
-        # prices = [a for a in prices]
 
-        self.prices = {a['_id']: a['price'] for a in prices}
-        # print(prices)
+        # 统计price到redis,fix之前临时价格保存到内存造成内存占用过高的问题 # self.prices = {a['_id']: a['price'] for a in prices}
+        for a in prices:
+            self.rds.set(name=a['_id'], value=a['price'], ex=3600)
+
         lg.info(f"total temp document:{total}")
         batch_size = self.batch_size
         skip = 0
@@ -197,6 +201,10 @@ class Task:
             skip += batch_size
         lg.info(f"complete hadle pnl.")
 
+    def _get_current_price(self, pair: str):
+        value = self.rds.get(name=pair)
+        return value if value else 0
+
     def _handle_pnl(self, temp):
         trader = temp.get('trader')
         pair = temp.get('pair')
@@ -204,10 +212,10 @@ class Task:
         avg_buy_price = temp.get('avg_buy_price')
         txs = temp.get('txs')
         rea_pnl = temp.get('rea_pnl')
-        current_price = self.prices[pair]
+        current_price = self._get_current_price(pair)
         flo_pnl = hold * (current_price - avg_buy_price)
         pnl = rea_pnl + flo_pnl
-        if hold < 0 or current_price > 100:
+        if hold < 0 or current_price > 100 or current_price <= 0:
             return
         query = {
             'date': self.now_date,
@@ -255,7 +263,8 @@ class Task:
 
     def run(self):
         lg.info("start job,good luck!")
-        schedule.every().day.at("00:02").do(self.job)  # 每日更新一次
+        schedule.every().day.at("12:00").do(self.job)  # 每日更新一次
+        # todo 新增定时清除旧的swap数据代码块，修改pnl.py为script.py
         while True:
             schedule.run_pending()
             time.sleep(0.1)
