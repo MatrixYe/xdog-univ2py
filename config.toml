@@ -8,9 +8,9 @@ factory = "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f"
 weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 #node_url = "https://aged-cosmological-snowflake.discover.quiknode.pro/edd8b6447abd44441d3112dc7cb3aa2b4540afb0/"
 #节点url
-node_url = "https://capable-white-vineyard.discover.quiknode.pro/424ed1ace81eb2419a6d022d376fcedca5a6e311/"
+node_url = "https://powerful-orbital-morning.discover.quiknode.pro/f1fd5506c5777528d2d618279b0952531cb8401e/"
 full_pair = false
-skip_history = true
+skip_history = false
 #default_pair_create_time = 1701888191
 
 start_block = 0

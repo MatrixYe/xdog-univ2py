@@ -29,7 +29,7 @@ class Task:
         self.rds = self._get_redis_client()
         self.day = 3
 
-        self.batch_size = 1000
+        self.batch_size = 500
         self.now_date = utils.now_date()
 
     def _get_mongo_client(self):
@@ -169,11 +169,24 @@ class Task:
         while skip < total:
             lg.info(
                 f"total={total} skip={skip} batch={batch_size} progress={round(min(100 * (skip + batch_size) / total, 100), 2)}%")
-            batch_documents = self.db[UNIV2_SWAP].find(filter=query).sort("_id").skip(skip).limit(batch_size)
+            projection = {
+                '_id': 1,
+                'trader': 1,
+                'pair': 1,
+                'is_buy': 1,
+                'amount': 1,
+                'value': 1,
+                'coin_symbol': 1,
+                'coin_addr': 1
+            }
+            batch_documents = self.db[UNIV2_SWAP].find(filter=query, projection=projection).sort(
+                [('ts', 1), ('_id', 1)]).skip(
+                skip).limit(batch_size)
             for document in batch_documents:
                 self._handle_swap(document)
 
             skip += batch_size
+            time.sleep(1)
         lg.info(f"complete hadle swap.")
 
     def _state_pnl(self):
@@ -203,7 +216,7 @@ class Task:
 
     def _get_current_price(self, pair: str):
         value = self.rds.get(name=pair)
-        return value if value else 0
+        return float(value) if value else 0
 
     def _handle_pnl(self, temp):
         trader = temp.get('trader')
@@ -282,3 +295,4 @@ if __name__ == '__main__':
     lg.info(f"input config file path:{c}")
     task = Task(c)
     task.run()
+    # task.testjob()
