@@ -44,7 +44,7 @@ class Task:
         self.factory_instance = self._gen_factory_instance(self.conf.factory)
 
     # 初始化操作
-    def _initsysctrl(self):
+    def _initialize(self):
         result = self._get_base()
         if not result:
             data = {
@@ -642,12 +642,6 @@ class Task:
         }
         self._find_and_set(UNIV2_PAIRS, {'_id': pair}, new_reserve, upsert=False)
 
-    # 核心功能代码入口
-    def run(self):
-        self._initsysctrl()
-        self._sync_all_pairs(False)
-        self._loop()
-
     # 迭代扫描区块
     def _loop(self):
         if self.conf.skip_history:
@@ -703,8 +697,14 @@ class Task:
                     return
         lg.info(f"sync_all_pairs is complete!")
 
+    # 核心功能代码入口
+    def run(self):
+        self._initialize()
+        self._sync_all_pairs(False)
+        self._loop()
+
 
 if __name__ == '__main__':
-    lg.info("start to sync ... ...")
+    lg.info("start to sync uniswap v2,good luck ... ...")
     Task().run()
     # Task().debug()

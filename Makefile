@@ -6,9 +6,9 @@ build:
 	echo 'biild'
 
 ## 启动同步器
-sync:
+start:
 	echo 'start'
-	python sync.py
+	python main.py
 
 ## 启动盈利统计任务
 pnl:
