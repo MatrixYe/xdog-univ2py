@@ -151,7 +151,6 @@ class Task:
         except Exception as e:
             lg.error(f"_get_remote_tx:{e}")
             return None
-        pass
 
     def _get_remote_pair_index(self) -> int:
         try:
@@ -175,14 +174,35 @@ class Task:
     def _update_base(self, field: str, new_data: Any):
         self.db[BASE].update_one({'_id': 1}, {'$set': {field: new_data}})
 
-    def _to_scan_block(self, i: int):
+    def _fetch_block(self, i: int):
+        try:
+            return self.w3.eth.get_block(i)
+        except Exception as _:
+            lg.error(f"net error:_fetch_block")
+            return None
+
+    def _fetch_logs(self, i: int):
+        try:
+            logs = self.w3.eth.get_logs(filter_params={
+                'fromBlock': i,
+                'toBlock': i,
+            })
+            # print(logs)
+            return logs
+        except Exception as e:
+            lg.error(f"net error:_fetch_logs")
+            return None
+
+    def _to_scan_block(self, i: int) -> bool:
         lg.info(f'to scan block:{i}')
-        block = self.w3.eth.get_block(i)
+        block = self._fetch_block(i)
+        if block is None:
+            # lg.info("block is None")
+            return False
         ts = block['timestamp']
-        logs = self.w3.eth.get_logs(filter_params={
-            'fromBlock': i,
-            'toBlock': i,
-        })
+        logs = self._fetch_logs(i)
+        if logs is None:
+            return False
         for log in logs:
             tx_hash = log.get("transactionHash").hex()
             contract_addr = log.get('address').lower()
@@ -201,6 +221,7 @@ class Task:
                     continue
                 self._handle_pair_event(ts, tx, log, pair_obj)
                 continue
+        return True
 
     # 获取远程block高度
     def _get_remote_block_number(self) -> int:
@@ -330,16 +351,12 @@ class Task:
 
     def _get_local_erc20(self, addr: str) -> dict | None:
         token = self.db[TOKENS].find_one(filter={'_id': addr.lower()})
-        if not token:
-            return None
-        else:
-            return {
-                'address': token.get('address'),
-                'symbol': token.get('symbol'),
-                'decimal': token.get('decimal'),
-                'total_supply': token.get('total_supply')
-            }
-        pass
+        return {
+            'address': token.get('address'),
+            'symbol': token.get('symbol'),
+            'decimal': token.get('decimal'),
+            'total_supply': token.get('total_supply')
+        } if token else None
 
     @staticmethod
     def _load_config() -> Config:
@@ -418,7 +435,7 @@ class Task:
             case _:
                 pass
 
-    def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name):
+    def _handle_factory_event_paircreated(self, ts: int, tx: dict, log, event_name) -> object:
 
         event = self._parse_com(log)
         arg_types = ['address', 'uint256']
@@ -671,7 +688,10 @@ class Task:
             self._update_base("remote_block", y)
             for i in range(x + 1, y + 1):
                 lg.debug(f"_loop:to scan block {i}")
-                self._to_scan_block(i)
+                ok = self._to_scan_block(i)
+                lg.info(f"scan block {i}: {'success' if ok else 'failed'}")
+                if not ok:
+                    break
                 self._set_sync_block(i)
                 time.sleep(0.2)
 
@@ -707,4 +727,5 @@ class Task:
 if __name__ == '__main__':
     lg.info("start to sync uniswap v2,good luck ... ...")
     Task().run()
+
     # Task().debug()
