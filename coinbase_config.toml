@@ -1,0 +1,29 @@
+title = "coinbase uniswap v2 sync&parse"
+
+#区块网络
+network = "coinbase"
+#uniswap v2 factory地址
+factory = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+#uniswap v2 weth 地址
+weth = "0x4200000000000000000000000000000000000006"
+#服务节点
+node_url = 'https://base-mainnet.g.alchemy.com/v2/mVtJ9Hcct_VERTMpYnoaRXJPfM6mTpnc'
+# 是否同步全部池子，仅池子基本信息，不包括历史交易数据
+full_pair = false
+# 是否跳过历史交易记录，若为true，从启动时刻开始同步
+skip_history = false
+#启动区块高度
+start_block = 0
+sync_interval = 1
+
+[mongo]
+host = "localhost"
+port = 5004
+username = "root"
+password = "password"
+
+[redis]
+host = "localhost"
+port = 5005
+password = "password"
+db = 0

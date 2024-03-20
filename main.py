@@ -5,6 +5,7 @@
 # Date:         2021/10/22 2:44 下午
 # Description: uniswap v2 数据同步
 # -------------------------------------------------------------------------------
+import argparse
 import json
 import logging
 import time
@@ -17,6 +18,10 @@ from web3 import Web3, HTTPProvider
 from web3.contract import Contract
 
 from config import load_config, Config
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--config", "-c", type=str)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 lg = logging.getLogger(__name__)
@@ -32,8 +37,8 @@ UNIV2_KLINE = "univ2_kline"
 
 class Task:
 
-    def __init__(self):
-        self.conf: Config = self._load_config()
+    def __init__(self, config_path: str):
+        self.conf: Config = self._load_config(config_path)
         self._factory_abi = self._read_factory_abi()
         self._pair_abi = self._read_pair_abi()
         self._erc20_abi = self._read_erc20_abi()
@@ -359,8 +364,8 @@ class Task:
         } if token else None
 
     @staticmethod
-    def _load_config() -> Config:
-        c = load_config("./config.toml")
+    def _load_config(config_path: str) -> Config:
+        c = load_config(config_path)
         lg.info(c)
         return c
 
@@ -726,6 +731,11 @@ class Task:
 
 if __name__ == '__main__':
     lg.info("start to sync uniswap v2,good luck ... ...")
-    Task().run()
-
-    # Task().debug()
+    args = parser.parse_args()
+    cpath: str = args.config
+    if not cpath:
+        lg.error("pleace input config path,eg:'python mian.py -c config.toml' ")
+        exit(500)
+    print(cpath)
+    task = Task(cpath)
+    task.run()
