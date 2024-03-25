@@ -3,7 +3,7 @@ title = "coinbase uniswap v2 sync&parse"
 #区块网络
 network = "coinbase"
 #uniswap v2 factory地址
-factory = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+factory = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
 #uniswap v2 weth 地址
 weth = "0x4200000000000000000000000000000000000006"
 #服务节点

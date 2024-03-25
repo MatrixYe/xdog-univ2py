@@ -4,6 +4,7 @@ title = "uniswap v2 sync&parse"
 network = "ethereum"
 #uniswap v2 factory地址
 factory = "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f"
+
 #uniswap v2 weth 地址
 weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 
